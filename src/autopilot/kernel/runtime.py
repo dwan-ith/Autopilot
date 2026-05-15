@@ -18,27 +18,22 @@ logger = logging.getLogger(__name__)
 
 
 class RuntimeKernel:
-<<<<<<< HEAD
-    def __init__(self, store: Store, registry: ConnectorRegistry, maas_registry: MAASConnectorRegistry | None = None):
-=======
-    def __init__(self, store: Store, registry: ConnectorRegistry, correlation_window_seconds: float = 0.45):
->>>>>>> 7e86d18fb019511de1ac9377bbddc4d936f91751
+    def __init__(self, store: Store, registry: ConnectorRegistry, maas_registry: MAASConnectorRegistry | None = None, correlation_window_seconds: float = 0.45):
         self.store = store
         self.registry = registry
         self.operators = OperatorSuite(registry)
         self.tracer = TraceSink(store)
         self._tasks: dict[str, asyncio.Task] = {}
-<<<<<<< HEAD
+        self._mission_locks: dict[str, asyncio.Lock] = {}
+        self.correlation_window_seconds = correlation_window_seconds
+
+        # MAAS agent orchestration
         self.agent_registry = maas_registry
         self._agent_queue: asyncio.Queue[AgentTask] = asyncio.Queue()
         self.orchestrator: OrchestratorAgent | None = None
         if maas_registry is not None:
             self.orchestrator = OrchestratorAgent(maas_registry, store, self._agent_queue)
         self._agent_worker_task: asyncio.Task | None = None
-=======
-        self._mission_locks: dict[str, asyncio.Lock] = {}
-        self.correlation_window_seconds = correlation_window_seconds
->>>>>>> 7e86d18fb019511de1ac9377bbddc4d936f91751
 
     async def ingest(self, signal: Signal) -> Mission:
         self.store.save_signal(signal)

@@ -5,7 +5,13 @@ from pathlib import Path
 from uuid import uuid4
 
 os.environ["AUTOPILOT_DISABLE_LLM"] = "1"
+os.environ.pop("DEPLOYMENT_WEBHOOK_URL", None)
+os.environ.pop("GITHUB_TOKEN", None)
+os.environ.pop("LINEAR_API_KEY", None)
+os.environ.pop("LINEAR_TEAM_ID", None)
+os.environ.pop("SLACK_WEBHOOK_URL", None)
 
+from autopilot.agents import CloudInfraAgent, ProjectMgmtAgent, SecurityAuditAgent
 from autopilot.connectors import default_registry
 from autopilot.connectors.service import ConnectorDirectory
 from autopilot.connectors.webhook import SentryConnector
@@ -170,6 +176,69 @@ class RuntimeKernelTest(unittest.TestCase):
             self.assertIn("artifact", signal.payload["output_contract"])
 
         asyncio.run(scenario())
+
+    def test_project_mgmt_agent_uses_linear_scope(self):
+        async def scenario():
+            tmp_dir = Path.cwd() / ".tmp"
+            tmp_dir.mkdir(exist_ok=True)
+            store = StateStore(tmp_dir / f"autopilot-{uuid4().hex}.db")
+            result = await ProjectMgmtAgent(store, default_registry()).create_follow_up_issue(
+                title="Follow up export incident",
+                description="Demo issue body",
+            )
+
+            self.assertEqual(result.agent, "project_mgmt")
+            self.assertEqual(result.actions[0].connector, "linear")
+            self.assertEqual(result.actions[0].action, "create_issue")
+
+        asyncio.run(scenario())
+
+    def test_cloud_infra_agent_only_triggers_deployment(self):
+        async def scenario():
+            tmp_dir = Path.cwd() / ".tmp"
+            tmp_dir.mkdir(exist_ok=True)
+            store = StateStore(tmp_dir / f"autopilot-{uuid4().hex}.db")
+            result = await CloudInfraAgent(store, default_registry()).trigger_deployment(
+                environment="staging",
+                ref="main",
+                reason="test deployment",
+            )
+
+            self.assertEqual(result.agent, "cloud_infra")
+            self.assertEqual(result.actions[0].connector, "cloud_infra")
+            self.assertEqual(result.actions[0].action, "trigger_deployment")
+            self._cleanup_action_artifacts(result)
+
+        asyncio.run(scenario())
+
+    def test_security_audit_agent_writes_artifact_and_notification(self):
+        async def scenario():
+            tmp_dir = Path.cwd() / ".tmp"
+            tmp_dir.mkdir(exist_ok=True)
+            store = StateStore(tmp_dir / f"autopilot-{uuid4().hex}.db")
+            result = await SecurityAuditAgent(store, default_registry()).run_pr_open_audit(
+                {
+                    "action": "opened",
+                    "repository": {"full_name": "demo/app"},
+                    "pull_request": {"number": 42, "title": "Update auth flow", "head": {"ref": "auth-update"}},
+                    "changed_files": ["src/auth.py"],
+                }
+            )
+
+            self.assertEqual(result.agent, "security_audit")
+            self.assertEqual(result.status, "complete")
+            self.assertTrue(any(action.connector == "artifact" for action in result.actions))
+            self.assertTrue(any(action.connector == "notification" for action in result.actions))
+            self._cleanup_action_artifacts(result)
+
+        asyncio.run(scenario())
+
+    def _cleanup_action_artifacts(self, result):
+        for action in result.actions:
+            if action.artifact_path:
+                path = Path(action.artifact_path)
+                if path.exists():
+                    path.unlink()
 
 
 if __name__ == "__main__":

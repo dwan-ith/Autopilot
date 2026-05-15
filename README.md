@@ -167,6 +167,14 @@ Invoke-RestMethod -Method Post `
   -Body '{"action":"opened","repository":{"full_name":"demo/app"},"pull_request":{"number":42,"title":"Update auth flow","head":{"ref":"auth-update"}}}'
 ```
 
+Run the scoped agents directly:
+
+```text
+POST /api/agents/project-mgmt/create-issue
+POST /api/agents/cloud-infra/trigger-deployment
+POST /api/agents/security-audit/pr-open
+```
+
 ## Architecture
 
 | Layer | Responsibility |

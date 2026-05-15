@@ -12,6 +12,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, HTMLResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 
+from autopilot.agents import CloudInfraAgent, ProjectMgmtAgent, SecurityAuditAgent
 from autopilot.connectors import default_registry
 from autopilot.connectors.service import ConnectorDirectory
 from autopilot.kernel import RuntimeKernel
@@ -32,6 +33,9 @@ registry = default_registry()
 directory = ConnectorDirectory(store)
 runtime = RuntimeKernel(store, registry)
 policy = PolicyEngine()
+project_mgmt_agent = ProjectMgmtAgent(store, registry, policy)
+cloud_infra_agent = CloudInfraAgent(store, registry, policy)
+security_audit_agent = SecurityAuditAgent(store, registry, policy)
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
@@ -160,6 +164,38 @@ async def connector_action(connector_name: str, action_name: str, request: Conne
         "decision": decision.model_dump() if decision else None,
         "action": result.model_dump(),
     }
+
+
+@app.post("/api/agents/project-mgmt/create-issue")
+async def run_project_mgmt_agent(payload: dict[str, Any]) -> dict[str, Any]:
+    result = await project_mgmt_agent.create_follow_up_issue(
+        mission_id=payload.get("mission_id"),
+        title=payload.get("title"),
+        description=payload.get("description"),
+        labels=payload.get("labels"),
+    )
+    return result.model_dump()
+
+
+@app.post("/api/agents/cloud-infra/trigger-deployment")
+async def run_cloud_infra_agent(payload: dict[str, Any]) -> dict[str, Any]:
+    result = await cloud_infra_agent.trigger_deployment(
+        mission_id=payload.get("mission_id"),
+        environment=payload.get("environment", "staging"),
+        ref=payload.get("ref", "main"),
+        reason=payload.get("reason", "AUTOPILOT deployment trigger"),
+        approved=bool(payload.get("approved", False)),
+    )
+    return result.model_dump()
+
+
+@app.post("/api/agents/security-audit/pr-open")
+async def run_security_audit_agent(payload: dict[str, Any]) -> dict[str, Any]:
+    result = await security_audit_agent.run_pr_open_audit(
+        payload=payload.get("payload", payload),
+        mission_id=payload.get("mission_id"),
+    )
+    return result.model_dump()
 
 
 @app.post("/webhooks/{connector_name}")

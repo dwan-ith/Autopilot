@@ -370,3 +370,7 @@ class Store:
                     json.dumps(connection.metadata, default=_json_default),
                 ),
             )
+
+
+class StateStore(Store):
+    """Shared durable mission state for orchestrator, agents, traces, and analytics."""

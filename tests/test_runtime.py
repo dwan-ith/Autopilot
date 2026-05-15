@@ -11,7 +11,7 @@ from autopilot.connectors.service import ConnectorDirectory
 from autopilot.connectors.webhook import SentryConnector
 from autopilot.kernel import RuntimeKernel
 from autopilot.models import AuthMode, ConnectorStatus, GraphNodeKind, MissionStatus, Signal
-from autopilot.storage import Store
+from autopilot.state_store import StateStore
 
 
 class RuntimeKernelTest(unittest.TestCase):
@@ -19,7 +19,7 @@ class RuntimeKernelTest(unittest.TestCase):
         async def scenario():
             tmp_dir = Path.cwd() / ".tmp"
             tmp_dir.mkdir(exist_ok=True)
-            store = Store(tmp_dir / f"autopilot-{uuid4().hex}.db")
+            store = StateStore(tmp_dir / f"autopilot-{uuid4().hex}.db")
             runtime = RuntimeKernel(store, default_registry(), correlation_window_seconds=0.05)
 
             first = Signal(
@@ -66,7 +66,7 @@ class RuntimeKernelTest(unittest.TestCase):
     def test_connector_directory_persists_demo_connections(self):
         tmp_dir = Path.cwd() / ".tmp"
         tmp_dir.mkdir(exist_ok=True)
-        store = Store(tmp_dir / f"autopilot-{uuid4().hex}.db")
+        store = StateStore(tmp_dir / f"autopilot-{uuid4().hex}.db")
         directory = ConnectorDirectory(store)
 
         items = directory.list()
@@ -93,7 +93,7 @@ class RuntimeKernelTest(unittest.TestCase):
         async def scenario():
             tmp_dir = Path.cwd() / ".tmp"
             tmp_dir.mkdir(exist_ok=True)
-            store = Store(tmp_dir / f"autopilot-{uuid4().hex}.db")
+            store = StateStore(tmp_dir / f"autopilot-{uuid4().hex}.db")
             runtime = RuntimeKernel(store, default_registry(), correlation_window_seconds=0.01)
 
             signal = Signal(
@@ -138,6 +138,36 @@ class RuntimeKernelTest(unittest.TestCase):
             self.assertEqual(signal.idempotency_key, "sentry:evt-1")
             self.assertIn("storefront", signal.entities)
             self.assertEqual(signal.urgency, "high")
+
+        asyncio.run(scenario())
+
+    def test_scoped_connectors_are_registered(self):
+        registry = default_registry()
+        manifests = {manifest.name: manifest for manifest in registry.manifests()}
+
+        self.assertEqual(manifests["linear"].safe_actions, ["create_issue"])
+        self.assertEqual(manifests["cloud_infra"].safe_actions, ["trigger_deployment"])
+        self.assertIn("pull_request.opened", manifests["security_audit"].event_types)
+
+    def test_security_audit_pr_open_contract(self):
+        async def scenario():
+            connector = default_registry().get("security_audit")
+            signal = await connector.normalize_event(
+                {
+                    "action": "opened",
+                    "repository": {"full_name": "demo/app"},
+                    "pull_request": {
+                        "number": 42,
+                        "title": "Update auth flow",
+                        "head": {"ref": "auth-update"},
+                    },
+                }
+            )
+
+            self.assertEqual(signal.type, "pull_request.opened")
+            self.assertIn("demo/app", signal.entities)
+            self.assertEqual(signal.payload["trigger"], "pr_open")
+            self.assertIn("artifact", signal.payload["output_contract"])
 
         asyncio.run(scenario())
 

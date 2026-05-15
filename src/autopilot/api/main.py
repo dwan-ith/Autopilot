@@ -15,9 +15,11 @@ from fastapi.staticfiles import StaticFiles
 from autopilot.connectors import default_registry
 from autopilot.connectors.service import ConnectorDirectory
 from autopilot.kernel import RuntimeKernel
-from autopilot.models import AuthMode, Signal, WebhookSignalRequest, new_id
+from autopilot.models import AuthMode, ConnectorActionRequest, Signal, WebhookSignalRequest, new_id
 from autopilot.operators.llm import active_provider_name
-from autopilot.storage import ARTIFACT_DIR, ROOT, Store
+from autopilot.policy import PolicyEngine
+from autopilot.state_store import StateStore
+from autopilot.storage import ARTIFACT_DIR, ROOT
 
 logging.basicConfig(
     level=logging.INFO,
@@ -25,10 +27,11 @@ logging.basicConfig(
     datefmt="%H:%M:%S",
 )
 
-store = Store()
+store = StateStore()
 registry = default_registry()
 directory = ConnectorDirectory(store)
 runtime = RuntimeKernel(store, registry)
+policy = PolicyEngine()
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
@@ -127,6 +130,37 @@ async def disconnect_connector(connector_id: str) -> dict[str, Any]:
         return connection.model_dump()
     except KeyError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+@app.post("/api/actions/{connector_name}/{action_name}")
+async def connector_action(connector_name: str, action_name: str, request: ConnectorActionRequest) -> dict[str, Any]:
+    if not registry.has_name(connector_name):
+        raise HTTPException(status_code=404, detail="Connector not found")
+
+    connector = registry.get(connector_name)
+    mission = store.get_mission(request.mission_id) if request.mission_id else None
+    payload = {**request.payload}
+    if request.mission_id:
+        payload.setdefault("mission_id", request.mission_id)
+
+    if mission:
+        decision = policy.decide(mission, connector, action_name)
+        mission.policy_decisions.append(decision)
+        store.update_mission(mission)
+        if not decision.allowed:
+            return {"allowed": False, "decision": decision.model_dump(), "action": None}
+    elif action_name not in connector.manifest.safe_actions:
+        raise HTTPException(status_code=400, detail="Action is not declared safe by connector")
+    else:
+        decision = None
+
+    result = await connector.action(action_name, payload)
+    store.trace(request.mission_id, f"connector.{connector_name}.{action_name}", result.status, result.model_dump())
+    return {
+        "allowed": True,
+        "decision": decision.model_dump() if decision else None,
+        "action": result.model_dump(),
+    }
+
 
 @app.post("/webhooks/{connector_name}")
 async def webhook(connector_name: str, request: Request) -> dict[str, Any]:

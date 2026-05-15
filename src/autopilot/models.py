@@ -221,3 +221,8 @@ class WebhookSignalRequest(BaseModel):
     entities: list[str] = Field(default_factory=list)
     urgency: str = "medium"
     payload: dict[str, Any] = Field(default_factory=dict)
+
+
+class ConnectorActionRequest(BaseModel):
+    mission_id: str | None = None
+    payload: dict[str, Any] = Field(default_factory=dict)

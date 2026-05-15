@@ -29,7 +29,7 @@ Core components:
 
 - Connector registry
 - Normalized object model
-- SQLite persistence
+- SQLite StateStore
 - Runtime kernel
 - Mission graph
 - Scoped operators
@@ -38,8 +38,22 @@ Core components:
 - Trace sink
 
 The runtime persists every mission, signal, operator step, policy decision,
-action, and trace event. SQLite runs with explicit connection handling and WAL
-mode for better local demo concurrency.
+action, memory item, and trace event through `StateStore`. SQLite runs with
+explicit connection handling and WAL mode for better local demo concurrency.
+This is the shared state boundary for the orchestrator, scoped agents, and
+analytics reads, so context survives a crashed worker or restarted server.
+
+## Scope Decisions
+
+Three agent surfaces are intentionally narrowed for the hackathon build:
+
+- Project management is Linear-first. Jira is only a config stub and returns a
+  blocked result instead of carrying a second integration.
+- Cloud infrastructure exposes one demoable action: trigger a deployment through
+  a webhook or GitHub Actions workflow dispatch. Provider APIs, rollbacks, and
+  cost APIs are outside this slot.
+- Security audit runs from a defined trigger: PR open events. Its output
+  contract is a durable audit artifact plus a Slack notification when configured.
 
 ## Autonomy
 

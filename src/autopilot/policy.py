@@ -19,6 +19,7 @@ class PolicyEngine:
         "notify_ops": (ActionRisk.MEDIUM, 0.55, False),
         "webhook_callback": (ActionRisk.MEDIUM, 0.6, False),
         "create_issue": (ActionRisk.MEDIUM, 0.72, True),
+        "trigger_deployment": (ActionRisk.HIGH, 0.85, True),
         "post_message": (ActionRisk.MEDIUM, 0.65, False),
         "mark_investigating": (ActionRisk.LOW, 0.45, False),
     }

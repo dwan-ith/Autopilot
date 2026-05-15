@@ -245,6 +245,9 @@ class OperatorSuite:
                     if isinstance(raw, list):
                         gathered.extend(e for e in raw if isinstance(e, Evidence))
 
+            if not gathered:
+                gathered.extend(await self._heuristic_investigate(mission, hyp))
+
             new_evidence = self._dedupe_evidence(mission.evidence, gathered)
             mission.evidence.extend(new_evidence)
             hyp.evidence_ids.extend(e.id for e in new_evidence)
@@ -406,6 +409,13 @@ class OperatorSuite:
         ]
         hyps = [Hypothesis(title=t, rationale=r) for t, r, kw in candidates if any(k in text for k in kw)]
         return hyps or [Hypothesis(title="Unclassified signal", rationale="No pattern matched; broad investigation required.", confidence=0.25)]
+
+    async def _heuristic_investigate(self, mission: Mission, hypothesis: Hypothesis) -> list[Evidence]:
+        query = f"{hypothesis.title} {' '.join(self.entities(mission))} {mission.signals[-1].summary if mission.signals else ''}"
+        gathered: list[Evidence] = []
+        for connector in self.registry.by_capability(Capability.SEARCH):
+            gathered.extend(await connector.search(query))
+        return gathered
 
     def _heuristic_brief(self, mission: Mission) -> str:
         top = sorted(mission.hypotheses, key=lambda h: h.confidence, reverse=True)

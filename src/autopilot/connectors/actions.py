@@ -137,6 +137,15 @@ class LinearConnector(Connector):
     )
 
     async def action(self, name: str, payload: dict) -> ActionResult:
+        if os.getenv("PROJECT_MGMT_PROVIDER", "linear").lower() == "jira":
+            return ActionResult(
+                connector=self.manifest.name,
+                action=name,
+                status="blocked",
+                summary="Jira is intentionally stubbed for this build. Set PROJECT_MGMT_PROVIDER=linear to create Linear issues.",
+                metadata={"provider": "jira", "stub": True},
+            )
+
         if name != "create_issue":
             raise NotImplementedError(f"Linear action '{name}' is not supported")
 
@@ -187,3 +196,95 @@ class LinearConnector(Connector):
                 summary=f"Linear issue creation failed: {exc}",
                 metadata={"mode": "linear_graphql"},
             )
+
+
+class CloudInfraConnector(Connector):
+    manifest = ConnectorManifest(
+        name="cloud_infra",
+        description="Triggers one demoable deployment action through a webhook or GitHub Actions dispatch.",
+        capabilities=[Capability.ACTION],
+        event_types=[],
+        safe_actions=["trigger_deployment"],
+        reliability_score=0.78,
+        auth_required=False,
+    )
+
+    async def action(self, name: str, payload: dict) -> ActionResult:
+        if name != "trigger_deployment":
+            return ActionResult(
+                connector=self.manifest.name,
+                action=name,
+                status="blocked",
+                summary=f"Unsupported cloud infra action '{name}'. Only trigger_deployment is in scope.",
+            )
+
+        deployment_payload = {
+            "environment": payload.get("environment", os.getenv("DEPLOYMENT_ENVIRONMENT", "staging")),
+            "ref": payload.get("ref", os.getenv("DEPLOYMENT_REF", "main")),
+            "mission_id": payload.get("mission_id"),
+            "reason": payload.get("reason", "AUTOPILOT deployment trigger"),
+        }
+        webhook_url = os.getenv("DEPLOYMENT_WEBHOOK_URL")
+        if webhook_url:
+            try:
+                async with httpx.AsyncClient(timeout=12) as client:
+                    response = await client.post(webhook_url, json=deployment_payload)
+                    response.raise_for_status()
+                return ActionResult(
+                    connector=self.manifest.name,
+                    action=name,
+                    status="complete",
+                    summary="Triggered deployment webhook.",
+                    metadata={"mode": "webhook", **deployment_payload},
+                )
+            except Exception as exc:
+                return ActionResult(
+                    connector=self.manifest.name,
+                    action=name,
+                    status="failed",
+                    summary=f"Deployment webhook failed: {exc}",
+                    metadata={"mode": "webhook"},
+                )
+
+        github_token = os.getenv("GITHUB_TOKEN")
+        repository = os.getenv("GITHUB_REPOSITORY")
+        workflow_id = os.getenv("GITHUB_WORKFLOW_ID")
+        if github_token and repository and workflow_id:
+            try:
+                async with httpx.AsyncClient(timeout=12) as client:
+                    response = await client.post(
+                        f"https://api.github.com/repos/{repository}/actions/workflows/{workflow_id}/dispatches",
+                        headers={
+                            "Authorization": f"Bearer {github_token}",
+                            "Accept": "application/vnd.github+json",
+                            "X-GitHub-Api-Version": "2022-11-28",
+                        },
+                        json={"ref": deployment_payload["ref"], "inputs": deployment_payload},
+                    )
+                    response.raise_for_status()
+                return ActionResult(
+                    connector=self.manifest.name,
+                    action=name,
+                    status="complete",
+                    summary="Triggered GitHub Actions workflow dispatch.",
+                    metadata={"mode": "github_actions", **deployment_payload},
+                )
+            except Exception as exc:
+                return ActionResult(
+                    connector=self.manifest.name,
+                    action=name,
+                    status="failed",
+                    summary=f"GitHub Actions dispatch failed: {exc}",
+                    metadata={"mode": "github_actions"},
+                )
+
+        path = ARTIFACT_DIR / f"deployment-trigger-{payload.get('mission_id', 'manual')}.json"
+        path.write_text(json.dumps(deployment_payload, indent=2), encoding="utf-8")
+        return ActionResult(
+            connector=self.manifest.name,
+            action=name,
+            status="complete",
+            summary="No deployment endpoint configured; wrote local deployment trigger artifact.",
+            artifact_path=str(path),
+            metadata={"mode": "local_fallback", **deployment_payload},
+        )

@@ -149,12 +149,12 @@ export default function Dashboard() {
                     description={selectedMission.summary}
                     status="complete"
                   />
-                  {selectedMission.hypotheses.map((h, i) => (
+                  {selectedMission.hypotheses?.map((h, i) => (
                     <TimelineItem 
                       key={h.id}
                       title={`Hypothesis: ${h.title}`}
                       description={h.rationale}
-                      status={selectedMission.status === "running" && i === selectedMission.hypotheses.length - 1 ? "running" : "complete"}
+                      status={selectedMission.status === "running" && i === (selectedMission.hypotheses?.length || 0) - 1 ? "running" : "complete"}
                     />
                   ))}
                   {selectedMission.status === "complete" && (
@@ -167,14 +167,14 @@ export default function Dashboard() {
               </div>
 
               {/* Evidence */}
-              {selectedMission.evidence.length > 0 && (
+              {(selectedMission.evidence?.length || 0) > 0 && (
                 <div className="space-y-4">
                   <h3 className="text-sm font-medium border-b pb-2 flex items-center gap-2">
                     <Search className="h-4 w-4" />
                     Gathered Evidence
                   </h3>
                   <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-                    {selectedMission.evidence.map(ev => (
+                    {selectedMission.evidence?.map(ev => (
                       <div key={ev.id} className="rounded-lg border bg-card p-4 shadow-sm">
                         <div className="flex items-center justify-between mb-2">
                           <span className="text-xs font-mono text-muted-foreground uppercase">{ev.source}</span>
@@ -189,14 +189,14 @@ export default function Dashboard() {
               )}
 
               {/* Actions */}
-              {selectedMission.actions.length > 0 && (
+              {(selectedMission.actions?.length || 0) > 0 && (
                 <div className="space-y-4">
                   <h3 className="text-sm font-medium border-b pb-2 flex items-center gap-2">
                     <ShieldCheck className="h-4 w-4" />
                     Executed Actions
                   </h3>
                   <div className="space-y-3">
-                    {selectedMission.actions.map(act => (
+                    {selectedMission.actions?.map(act => (
                       <div key={act.id} className="flex items-start gap-3 rounded-lg border bg-card p-4 shadow-sm">
                         <CheckCircle2 className="h-5 w-5 text-emerald-500 shrink-0 mt-0.5" />
                         <div>

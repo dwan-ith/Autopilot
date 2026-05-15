@@ -233,3 +233,19 @@ class GoogleDriveConnector(Connector):
                 )
         except Exception as e:
             return ActionResult(connector="google_drive", action="create_doc", status="failed", summary=str(e))
+
+    def as_tools(self):
+        from autopilot.agents.base import Tool
+        return [
+            Tool(
+                name="drive_search_files",
+                description=(
+                    "Search Google Drive for files, runbooks, post-mortems, or documentation. "
+                    "Use to find historical incident records, architecture docs, or playbooks. "
+                    "Requires Google Drive OAuth authorization."
+                ),
+                parameters={"query": "Drive search query (e.g. 'post-mortem incident 2024')"},
+                fn=self.search,
+            )
+        ]
+

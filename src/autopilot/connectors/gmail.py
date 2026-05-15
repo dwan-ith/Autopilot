@@ -227,3 +227,19 @@ class GmailConnector(Connector):
             urgency="low",
             payload=payload,
         )
+
+    def as_tools(self):
+        from autopilot.agents.base import Tool
+        return [
+            Tool(
+                name="gmail_search_threads",
+                description=(
+                    "Search Gmail inbox for relevant email threads. "
+                    "Use to find customer escalations, support tickets, or team communications. "
+                    "Requires Gmail OAuth authorization."
+                ),
+                parameters={"query": "Gmail search query (e.g. 'subject:incident from:customer')"},
+                fn=self.search,
+            )
+        ]
+

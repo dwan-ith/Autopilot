@@ -1,0 +1,60 @@
+{
+  "packet_name": "action-packet-mission_c8799c9336ae",
+  "mission_id": "mission_c8799c9336ae",
+  "title": "checkout-service: API latency p99 exceeded 3s on checkout service",
+  "severity": "high",
+  "confidence": 0.78,
+  "hypotheses": [
+    {
+      "id": "hyp_4daebbb36c63",
+      "title": "Increased load on the checkout service",
+      "rationale": "A sudden surge in user traffic or requests to the checkout service could overwhelm its resources, leading to increased latency. This is especially relevant given the impact on payments.",
+      "confidence": 0.74,
+      "evidence_ids": [
+        "ev_877e38c35c0e",
+        "ev_5f34ebc1d57f",
+        "ev_37fac0e4bf91",
+        "ev_cad0f00b650e"
+      ],
+      "status": "open"
+    },
+    {
+      "id": "hyp_a0ab4597fd60",
+      "title": "Database query performance degradation",
+      "rationale": "Slow database queries within the checkout service could be a bottleneck. This could be due to inefficient queries, database locking, or increased data volume.",
+      "confidence": 0.7,
+      "evidence_ids": [
+        "ev_ca66e6ab50dd",
+        "ev_724953fed85c",
+        "ev_4d61a7460a91"
+      ],
+      "status": "open"
+    },
+    {
+      "id": "hyp_b6fbb6b224ff",
+      "title": "Dependency service degradation (e.g., payment gateway)",
+      "rationale": "The checkout service relies on other services, such as payment gateways. If one of these dependencies is experiencing performance issues, it could impact the checkout service's latency.",
+      "confidence": 0.4,
+      "evidence_ids": [],
+      "status": "open"
+    },
+    {
+      "id": "hyp_1d11183cea36",
+      "title": "Recent code deployment introduced a performance regression",
+      "rationale": "A recent code change to the checkout service might have introduced a performance bottleneck, such as inefficient algorithms or resource leaks.",
+      "confidence": 0.86,
+      "evidence_ids": [
+        "ev_7c0880f955b8",
+        "ev_1239ad7ecb5b",
+        "ev_23b7a9b343a3",
+        "ev_3987e52f6e67",
+        "ev_c7227dae3828",
+        "ev_8383c57d68db",
+        "ev_effb62d36f3c"
+      ],
+      "status": "open"
+    }
+  ],
+  "evidence_count": 14,
+  "recommended_action": "Prepare rollback or disable the affected feature flag."
+}

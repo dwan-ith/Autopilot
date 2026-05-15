@@ -800,7 +800,11 @@ function ConnectorCard({
   const [busy, setBusy] = useState(false);
   const connected = connector.status === "connected";
   const canDemoConnect = connector.demo_available || connector.auth_mode === "none";
-  const readiness = runtimeConnector?.readiness;
+  const readiness = runtimeConnector?.readiness as
+    | (Record<string, unknown> & { configured?: boolean; detail?: string; mode?: string; missing?: string[]; auth_url?: string })
+    | undefined;
+  const oauthUrl = readiness?.auth_url as string | undefined;
+  const isOAuthConnector = connector.auth_mode === "oauth" || !!oauthUrl;
 
   const handleToggle = async () => {
     if (busy) return;
@@ -828,12 +832,14 @@ function ConnectorCard({
         <div className={cn(
           "flex items-center gap-1.5 rounded-full px-2.5 py-1 text-[10px] font-black uppercase tracking-tighter ring-1 ring-inset",
           connected
-            ? "bg-emerald-500/5 text-emerald-500 ring-emerald-500/20" 
-            : connector.implemented
-              ? "bg-blue-500/5 text-blue-500 ring-blue-500/20"
-              : "bg-white/5 text-muted-foreground ring-white/10"
+            ? "bg-emerald-500/5 text-emerald-500 ring-emerald-500/20"
+            : readiness?.configured
+              ? "bg-emerald-500/5 text-emerald-500 ring-emerald-500/20"
+              : connector.implemented
+                ? "bg-blue-500/5 text-blue-500 ring-blue-500/20"
+                : "bg-white/5 text-muted-foreground ring-white/10"
         )}>
-          {connected ? "CONNECTED" : connector.implemented ? "ADAPTER" : "CATALOG"}
+          {connected || readiness?.configured ? "CONNECTED" : connector.implemented ? "ADAPTER" : "CATALOG"}
         </div>
       </div>
 
@@ -846,19 +852,19 @@ function ConnectorCard({
         {readiness && (
           <div className="rounded-md border border-white/5 bg-black/20 p-2 text-[11px] leading-relaxed text-muted-foreground">
             <div className="flex items-center justify-between gap-2">
-              <span>{readiness.detail}</span>
+              <span>{readiness.detail as string}</span>
               <span className={cn(
                 "rounded border px-1.5 py-0.5 text-[9px] font-black uppercase",
                 readiness.configured ? "border-emerald-500/20 text-emerald-500" : "border-amber-500/20 text-amber-500"
               )}>
-                {readiness.mode}
+                {readiness.mode as string}
               </span>
             </div>
-            {readiness.missing.length > 0 && (
+            {(readiness.missing as string[] | undefined)?.length ? (
               <div className="mt-1 font-mono text-[10px] text-amber-500/80">
-                Missing: {readiness.missing.join(", ")}
+                Missing: {(readiness.missing as string[]).join(", ")}
               </div>
-            )}
+            ) : null}
           </div>
         )}
 
@@ -869,24 +875,51 @@ function ConnectorCard({
             </span>
           ))}
         </div>
-        
-        <button
-          onClick={handleToggle}
-          disabled={busy || (!connected && !canDemoConnect)}
-          className="flex w-full items-center justify-between rounded-lg bg-secondary/50 px-4 py-2.5 text-[12px] font-bold transition-all hover:bg-secondary disabled:cursor-not-allowed disabled:opacity-50"
-        >
-          {busy
-            ? "Updating..."
-            : connected
-              ? "Disconnect Demo"
-              : canDemoConnect
-                ? "Connect Demo"
-                : "OAuth Required"}
-          <ArrowRight className="h-3.5 w-3.5 opacity-40 group-hover:translate-x-0.5 transition-transform" />
-        </button>
+
+        {/* Real OAuth button — redirects to Google consent screen */}
+        {oauthUrl && !readiness?.configured ? (
+          <a
+            href={oauthUrl}
+            className="flex w-full items-center justify-between rounded-lg border border-blue-500/30 bg-blue-600/10 px-4 py-2.5 text-[12px] font-bold text-blue-400 transition-all hover:bg-blue-600/20 hover:text-blue-300 hover:border-blue-400/50"
+          >
+            <span className="flex items-center gap-2">
+              <svg className="h-3.5 w-3.5" viewBox="0 0 24 24" fill="currentColor">
+                <path d="M22.56 12.25c0-.78-.07-1.53-.2-2.25H12v4.26h5.92c-.26 1.37-1.04 2.53-2.21 3.31v2.77h3.57c2.08-1.92 3.28-4.74 3.28-8.09z" fill="#4285F4"/>
+                <path d="M12 23c2.97 0 5.46-.98 7.28-2.66l-3.57-2.77c-.98.66-2.23 1.06-3.71 1.06-2.86 0-5.29-1.93-6.16-4.53H2.18v2.84C3.99 20.53 7.7 23 12 23z" fill="#34A853"/>
+                <path d="M5.84 14.09c-.22-.66-.35-1.36-.35-2.09s.13-1.43.35-2.09V7.07H2.18C1.43 8.55 1 10.22 1 12s.43 3.45 1.18 4.93l2.85-2.22.81-.62z" fill="#FBBC05"/>
+                <path d="M12 5.38c1.62 0 3.06.56 4.21 1.64l3.15-3.15C17.45 2.09 14.97 1 12 1 7.7 1 3.99 3.47 2.18 7.07l3.66 2.84c.87-2.6 3.3-4.53 6.16-4.53z" fill="#EA4335"/>
+              </svg>
+              Connect with Google
+            </span>
+            <ArrowRight className="h-3.5 w-3.5 opacity-70" />
+          </a>
+        ) : readiness?.configured ? (
+          <div className="flex w-full items-center justify-between rounded-lg border border-emerald-500/20 bg-emerald-500/5 px-4 py-2.5 text-[12px] font-bold text-emerald-400">
+            <span className="flex items-center gap-2">
+              <CheckCircle2 className="h-3.5 w-3.5" />
+              Authorized
+            </span>
+            <span className="text-[10px] opacity-60 uppercase tracking-wider">{readiness.mode as string}</span>
+          </div>
+        ) : (
+          <button
+            onClick={handleToggle}
+            disabled={busy || (!connected && !canDemoConnect && !isOAuthConnector)}
+            className="flex w-full items-center justify-between rounded-lg bg-secondary/50 px-4 py-2.5 text-[12px] font-bold transition-all hover:bg-secondary disabled:cursor-not-allowed disabled:opacity-50"
+          >
+            {busy
+              ? "Updating..."
+              : connected
+                ? "Disconnect Demo"
+                : canDemoConnect
+                  ? "Connect Demo"
+                  : "API Key Required"}
+            <ArrowRight className="h-3.5 w-3.5 opacity-40 group-hover:translate-x-0.5 transition-transform" />
+          </button>
+        )}
       </div>
 
-      {!connector.implemented && !canDemoConnect && (
+      {!connector.implemented && !canDemoConnect && !oauthUrl && (
         <div className="absolute inset-0 z-10 flex flex-col items-center justify-center bg-background/60 opacity-0 group-hover:opacity-100 backdrop-blur-[2px] transition-opacity">
           <Lock className="h-6 w-6 text-muted-foreground/40 mb-2" />
           <p className="text-[11px] font-bold text-muted-foreground uppercase tracking-widest">OAuth adapter pending</p>
@@ -904,7 +937,7 @@ const NODE_KIND_COLORS: Record<string, { bg: string; border: string; text: strin
   branch:     { bg: "bg-cyan-500/10",    border: "border-cyan-500/30",    text: "text-cyan-400",    glow: "shadow-[0_0_12px_rgba(6,182,212,0.3)]" },
   subagent:   { bg: "bg-amber-500/10",   border: "border-amber-500/30",   text: "text-amber-400",   glow: "shadow-[0_0_12px_rgba(245,158,11,0.3)]" },
   operator:   { bg: "bg-pink-500/10",    border: "border-pink-500/30",    text: "text-pink-400",    glow: "shadow-[0_0_12px_rgba(236,72,153,0.3)]" },
-  replan:     { bg: "bg-orange-500/10",   border: "border-orange-500/30",  text: "text-orange-400",  glow: "shadow-[0_0_12px_rgba(249,115,22,0.3)]" },
+  replan:     { bg: "bg-orange-500/10",  border: "border-orange-500/30",  text: "text-orange-400",  glow: "shadow-[0_0_12px_rgba(249,115,22,0.3)]" },
   action:     { bg: "bg-emerald-500/10", border: "border-emerald-500/30", text: "text-emerald-400", glow: "shadow-[0_0_12px_rgba(16,185,129,0.3)]" },
   policy:     { bg: "bg-red-500/10",     border: "border-red-500/30",     text: "text-red-400",     glow: "shadow-[0_0_12px_rgba(239,68,68,0.3)]" },
   validation: { bg: "bg-teal-500/10",    border: "border-teal-500/30",    text: "text-teal-400",    glow: "shadow-[0_0_12px_rgba(20,184,166,0.3)]" },

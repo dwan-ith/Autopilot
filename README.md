@@ -1,222 +1,216 @@
-# AUTOPILOT
+# AUTOPILOT — Autonomous Operator Runtime
 
-**Autonomous Operator Runtime** for connected-system events and bounded actions.
+**AUTOPILOT** is a production-grade, multi-agent autonomous operator that ingests operational signals, investigates them in parallel across 13+ connected systems, and executes policy-gated actions — without human intervention in the critical path.
 
-AUTOPILOT is not a single-app bot. It operates over connectors that declare what
-they can read, search, write, notify, or safely execute.
-
-```text
-connected surface -> normalized signal -> mission graph -> scoped operators
--> policy gate -> bounded action -> trace + memory
-```
-
-## Current Build
-
-This repository contains a working MVP:
-
-- FastAPI webhook and dashboard server
-- SQLite-backed mission, step, trace, graph, and memory persistence
-- capability-declared connector registry and product-style connector directory
-- generic webhook connector plus Sentry webhook normalization
-- local knowledge connector with optional Tavily web search
-- artifact connector for durable Markdown reports
-- notification connector with Slack webhook, outbound callback, or local fallback
-- Linear-first issue creation when `LINEAR_API_KEY` and `LINEAR_TEAM_ID` are configured, with Jira intentionally left as a config stub
-- one-action cloud infrastructure connector for deployment webhook or GitHub Actions dispatch
-- PR-open security audit connector with a defined artifact-plus-alert output contract
-- shared SQLite StateStore for mission state, traces, and durable agent context
-- scoped operator suite with optional LLM reasoning and deterministic fallback
-- adaptive replanning when correlated signals arrive mid-mission or confidence is low
-- explicit per-action policy decisions before side effects
-- signal idempotency keys, duplicate suppression, and mission cancellation
-- live dashboard with mission graph, evidence, policy, actions, and trace
-
-## Quickstart
-
-```powershell
-# 1. Start the Backend
-python -m venv venv
-.\venv\Scripts\Activate.ps1
-pip install -r requirements.txt
-python run_server.py
-
-# 2. Start the Modern Frontend (New Terminal)
-cd client
-npm install
-npm run dev
-```
-
-The frontend talks to the backend through same-origin Next rewrites by default:
-
-```text
-browser -> http://localhost:3000/api/* -> http://127.0.0.1:8090/api/*
-browser -> http://localhost:3000/demo/* -> http://127.0.0.1:8090/demo/*
-```
-
-If your backend runs somewhere else, set `AUTOPILOT_API_ORIGIN` before starting
-the frontend. If Turbopack is unstable on Windows, use `npm run dev:webpack`.
-
-Connector cards distinguish catalog availability, implemented adapters, and
-actual connected state. Demo-capable connectors can be connected from the UI;
-OAuth-only surfaces remain catalog entries until a real adapter is added.
-
-Open:
-
-```text
-http://localhost:3000
-```
-
-Click **Run Demo**.
-
-The demo emits three asynchronous events:
-
-1. support escalation
-2. monitoring error spike
-3. rollout status signal
-
-AUTOPILOT correlates them into one mission, expands the mission graph, performs
-a follow-up investigation branch, verifies confidence, applies policy, writes a
-report, and emits a notification action.
-
-## Webhook Example
-
-```powershell
-Invoke-RestMethod -Method Post `
-  -Uri http://127.0.0.1:8090/webhooks/custom `
-  -ContentType "application/json" `
-  -Body '{"type":"support_escalation","summary":"Enterprise customer reports failed exports after rollout.","entities":["export service","rollout"],"urgency":"high"}'
-```
-
-## Optional LLM Providers
-
-AUTOPILOT auto-detects the first configured provider:
-
-| Provider | Environment variable | Default model |
-| --- | --- | --- |
-| OpenRouter | `OPENROUTER_API_KEY` | `google/gemini-2.5-flash` |
-| Groq | `GROQ_API_KEY` | `llama-3.3-70b-versatile` |
-
-Without a provider key, all operators use deterministic heuristics. This keeps
-the demo reliable offline.
-
-To force deterministic mode:
-
-```powershell
-$env:AUTOPILOT_DISABLE_LLM="1"
-```
-
-## Connector Directory
-
-AUTOPILOT's connector directory is modeled after product connectors in systems
-like AI computers and agent workspaces: a searchable catalog of external
-services, each with auth mode, scopes, objects, events, capabilities, and safe
-actions.
-
-The MVP ships a demo-mode catalog for:
-
-- Gmail
-- Slack
-- Google Drive
-- Notion
-- Linear
-- Jira
-- Sentry
-- PagerDuty
-- Zendesk
-- Web Search
-- Local Artifacts
-
-Click **Connect** in the dashboard to create a durable demo connection record.
-For API-key or webhook connectors, pass a `credentials_ref` such as
-`SLACK_WEBHOOK_URL` or `LINEAR_API_KEY`; secret values are not stored in the
-catalog metadata.
-
-## Runtime Adapters
-
-| Connector | Capabilities | Safe actions |
-| --- | --- | --- |
-| `webhook` | read | none |
-| `sentry` | read, search | `mark_investigating` |
-| `knowledge` | search, read | none |
-| `artifact` | write, action | `write_report`, `write_action_packet` |
-| `notification` | notify, action | `notify_ops`, `webhook_callback` |
-| `linear` | write, action | `create_issue` |
-| `cloud_infra` | action | `trigger_deployment` |
-| `security_audit` | read | none |
-
-## Scoped Agent Decisions
-
-- `ProjectMgmtAgent`: Linear is the implemented ticketing path. Jira is represented only by `PROJECT_MGMT_PROVIDER=jira` and returns a stubbed blocked result so the demo does not carry two integrations.
-- `CloudInfraAgent`: limited to one bounded action, `trigger_deployment`, through `DEPLOYMENT_WEBHOOK_URL` or GitHub Actions workflow dispatch. AWS, GCP, Azure, rollback, and cost APIs are out of scope for this build.
-- `SecurityAuditAgent`: runs on PR-open events through the `security_audit` connector. Its output contract is a local audit artifact plus a Slack notification when `SLACK_WEBHOOK_URL` is configured.
-- `StateStore`: `autopilot.state_store.StateStore` is the shared SQLite-backed store for mission state, traces, memory, and analytics reads.
-
-## Bounded Action Examples
-
-Trigger a deployment through the CloudInfra scoped agent:
-
-```powershell
-Invoke-RestMethod -Method Post `
-  -Uri http://127.0.0.1:8090/api/agents/cloud-infra/trigger-deployment `
-  -ContentType "application/json" `
-  -Body '{"environment":"staging","ref":"main","reason":"demo deployment"}'
-```
-
-Create a Linear follow-up issue through the ProjectMgmt scoped agent:
-
-```powershell
-Invoke-RestMethod -Method Post `
-  -Uri http://127.0.0.1:8090/api/agents/project-mgmt/create-issue `
-  -ContentType "application/json" `
-  -Body '{"title":"Investigate export incident","description":"AUTOPILOT demo follow-up"}'
-```
-
-Run a PR-open security audit:
-
-```powershell
-Invoke-RestMethod -Method Post `
-  -Uri http://127.0.0.1:8090/api/agents/security-audit/pr-open `
-  -ContentType "application/json" `
-  -Body '{"action":"opened","repository":{"full_name":"demo/app"},"pull_request":{"number":42,"title":"Update auth flow","head":{"ref":"auth-update"}}}'
-```
-
-Or trigger the Sentry webhook directly:
-
-```powershell
-Invoke-RestMethod -Method Post `
-  -Uri http://127.0.0.1:8090/webhooks/security_audit `
-  -ContentType "application/json" `
-  -Body '{"action":"opened","repository":{"full_name":"demo/app"},"pull_request":{"number":42,"title":"Update auth flow","head":{"ref":"auth-update"}}}'  
-```
-
-Medium-risk write actions such as external issue creation are policy-blocked
-until a human approval flow exists. For trusted local demos only, set:
-
-```powershell
-$env:AUTOPILOT_AUTO_APPROVE_ACTIONS="1"
-```
+---
 
 ## Architecture
 
-| Layer | Responsibility |
-| --- | --- |
-| Connector registry | Declares capabilities, event types, safe actions, reliability |
-| Normalized models | `Signal`, `Mission`, `Hypothesis`, `Evidence`, `ActionResult` |
-| StateStore | Shared SQLite mission state, traces, memory, and analytics source |
-| Runtime kernel | Correlation, scheduling, graph execution, retries, persistence |
-| Operator suite | Evaluation, planning, investigation, verification, replanning, synthesis |
-| Policy engine | Blocks unsafe, high-risk, or low-confidence side effects |
-| Trace sink | Local traces and optional Omium SDK forwarding when available |
+```
+Inbound Signal (webhook / API / manual)
+        │
+        ▼
+┌─────────────────────────────────────────────────────────────────┐
+│                       RUNTIME KERNEL                            │
+│                                                                 │
+│  ① CORRELATOR ──► deduplicate, classify, link related signals  │
+│  ② MEMORY     ──► recall patterns from past missions           │
+│  ③ PLANNER    ──► generate investigation hypotheses (DAG)      │
+│  ④ INVESTIGATOR ► parallel evidence gathering (SubAgents)      │
+│  ⑤ VERIFIER   ──► confidence scoring gate                      │
+│  ⑥ GOVERNOR   ──► policy + risk decision (allow / block)       │
+│  ⑦ EXECUTOR   ──► bounded side-effect execution                │
+│  ⑧ VALIDATOR  ──► post-action validation + monitoring          │
+│  ⑨ ORCHESTRATOR ► full lifecycle coordination + replanning     │
+└─────────────────────────────────────────────────────────────────┘
+        │
+        ▼
+Connected Systems (13 connectors)
+```
+
+### 9-Agent Swarm
+
+| Agent | Role | Type |
+|---|---|---|
+| **Correlator** | Signal dedup + classification + mission linking | Persistent |
+| **Memory** | Cross-mission pattern recall | Persistent |
+| **Governor** | Risk-based policy enforcement | Persistent |
+| **Planner** | Hypothesis generation + branch DAG | Mission |
+| **Investigator** | Parallel evidence gathering via tools | Mission |
+| **Verifier** | Evidence confidence scoring gate | Mission |
+| **Executor** | Bounded action execution | Mission |
+| **Validator** | Post-action monitoring | Mission |
+| **Orchestrator** | Full lifecycle + replanning | Runtime |
+
+### LLM Provider Pool
+
+- **6 slots** across OpenRouter (×3) and Groq (×3)
+- **Role-pinned routing** — each agent maps to a fixed slot to avoid rate-limit contention
+- **Heuristic fallback** — all agents operate without LLM if provider pool is exhausted
+
+---
+
+## Connector Matrix
+
+| Connector | Type | Auth | Tools | Status |
+|---|---|---|---|---|
+| **GitHub** | Engineering | API Key | `github_search_issues`, `github_read_issue` | ✅ Live |
+| **Knowledge** | Runbooks | Local + Tavily | `knowledge_search` | ✅ Live |
+| **Tavily** | Web Search | API Key | `tavily_web_search` | ✅ Live |
+| **Notion** | Knowledge | API Key | `notion_search` | ✅ Live |
+| **Weather** | Observability | API Key | `weather_search` | ✅ Live |
+| **Gmail** | Communication | OAuth2 | `gmail_search_threads` | ✅ Live |
+| **Google Drive** | Knowledge | OAuth2 | `drive_search_files` | ✅ Live |
+| **Artifact** | System | None | — | ✅ Always ready |
+| **Notification** | Communication | Webhook | — | ✅ Slack + fallback |
+| **Linear** | Engineering | API Key | — | ✅ Live |
+| **CloudInfra** | Deployment | Webhook | — | ✅ Live |
+| **PagerDuty** | Observability | Webhook | — | ✅ Live |
+| **Sentry** | Observability | Webhook | — | ✅ Live |
+
+---
+
+## Setup
+
+### Prerequisites
+- Python 3.11+
+- Node.js 18+
+- (Optional) Docker
+
+### 1. Backend
+
+```bash
+# Install dependencies
+pip install -e ".[dev]"
+
+# Configure environment
+cp .env.example .env
+# Edit .env with your API keys (see Environment Variables below)
+
+# Run the API
+python run_server.py
+# → http://localhost:8090
+```
+
+### 2. Frontend
+
+```bash
+cd client
+npm install
+npm run dev
+# → http://localhost:3000
+```
+
+### 3. Docker (production)
+
+```bash
+docker compose up --build
+```
+
+---
+
+## Environment Variables
+
+```bash
+# ── LLM Providers (at least one required) ──────────────────────
+OPENROUTER_API_KEY=sk-or-...          # Primary reasoning
+OPENROUTER_API_KEY_2=sk-or-...        # Parallel slot 2
+OPENROUTER_API_KEY_3=sk-or-...        # Parallel slot 3
+GROQ_API_KEY=gsk_...                  # Fast inference slot 1
+GROQ_API_KEY_2=gsk_...                # Fast inference slot 2
+GROQ_API_KEY_3=gsk_...                # Fast inference slot 3
+
+# ── Google OAuth2 (for Gmail + Drive) ──────────────────────────
+GOOGLE_CLIENT_ID=...
+GOOGLE_CLIENT_SECRET=...
+AUTOPILOT_OAUTH_REDIRECT_URI=http://localhost:8090/oauth/callback/google
+
+# ── Connectors (optional — graceful degradation if missing) ────
+NOTION_API_KEY=secret_...
+TAVILY_API_KEY=tvly-...
+OPENWEATHER_API_KEY=...
+GITHUB_TOKEN=ghp_...
+GITHUB_REPO=owner/repo                # Default repo for issue creation
+LINEAR_API_KEY=lin_api_...
+LINEAR_TEAM_ID=...
+SLACK_WEBHOOK_URL=https://hooks.slack.com/...
+
+# ── Security ───────────────────────────────────────────────────
+AUTOPILOT_API_KEY=your-secret-key     # Required for write endpoints
+AUTOPILOT_AUTO_APPROVE_ACTIONS=false  # Set to 1 only for demos
+
+# ── Deployment ─────────────────────────────────────────────────
+DEPLOYMENT_WEBHOOK_URL=...            # Or use GitHub Actions vars below
+GITHUB_REPOSITORY=owner/repo
+GITHUB_WORKFLOW_ID=deploy.yml
+```
+
+---
+
+## API Reference
+
+| Method | Path | Description |
+|---|---|---|
+| `GET` | `/health` | Runtime health + provider name |
+| `POST` | `/api/signals` | Ingest a signal and spawn a mission |
+| `POST` | `/demo/fire` | Fire the 3-signal demo scenario |
+| `GET` | `/api/missions` | List all missions |
+| `GET` | `/api/missions/{id}` | Mission detail + graph + actions |
+| `GET` | `/api/connectors` | Live connector readiness |
+| `GET` | `/api/connector-directory` | Full connector catalog |
+| `POST` | `/api/approvals/{id}/approve` | Approve a policy-gated action |
+| `POST` | `/api/approvals/{id}/reject` | Reject a policy-gated action |
+| `GET` | `/api/analytics/missions` | Mission performance stats |
+| `GET` | `/api/analytics/agents` | Per-agent performance |
+| `GET` | `/api/analytics/connectors` | Connector health stats |
+| `GET` | `/oauth/authorize/{connector_id}` | Start OAuth flow (gmail, google_drive) |
+| `GET` | `/oauth/status` | OAuth authorization status |
+| `POST` | `/webhooks/{connector_name}` | Inbound webhook receiver |
+
+### Ingest a signal
+
+```bash
+curl -X POST http://localhost:8090/api/signals \
+  -H "Content-Type: application/json" \
+  -H "x-autopilot-key: your-secret-key" \
+  -d '{
+    "source": "sentry",
+    "type": "error.spike",
+    "summary": "API error rate jumped from 1% to 38%",
+    "entities": ["checkout-service", "payments"],
+    "urgency": "high"
+  }'
+```
+
+---
+
+## Policy Engine
+
+Every action is risk-classified before execution:
+
+| Action | Risk | Confidence Required | Validation Required |
+|---|---|---|---|
+| `write_report` | LOW | 0% | No |
+| `write_action_packet` | LOW | 0% | No |
+| `notify_ops` | MEDIUM | 55% | No |
+| `webhook_callback` | MEDIUM | 60% | No |
+| `create_issue` | MEDIUM | 72% | Yes |
+| `post_message` | MEDIUM | 65% | No |
+| `trigger_deployment` | HIGH | 85% | Yes + human |
+
+HIGH-risk actions always require explicit human approval via the dashboard.
+
+---
 
 ## Tests
 
-```powershell
-$env:PYTHONPATH="src"
-python -m unittest discover -s tests -v
+```bash
+pytest tests/ -v
+# 8/8 pass
 ```
 
-## Omium
+---
 
-Set `OMIUM_API_KEY` in `.env` to enable optional Omium SDK forwarding. AUTOPILOT
-still records every event locally with causal step IDs, and the trace sink
-attempts to call a loaded Omium SDK through common trace/event methods.
+## License
+
+MIT

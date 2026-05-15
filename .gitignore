@@ -4,6 +4,11 @@ __pycache__/
 .env
 traces.jsonl
 *.sqlite
+*.db
+.tmp/
+*.log
+artifacts/mission-*.md
+artifacts/notification-*.json
 .DS_Store
 node_modules/
 dist/

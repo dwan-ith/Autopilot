@@ -82,6 +82,22 @@ class RuntimeKernel:
             mission = self.store.get_mission(mission_id) or mission
             mission = await self.operators.evaluate_signal(mission)
             self.store.update_mission(mission)
+
+            if len(mission.signals) > 1 and mission.replans < 1:
+                async with self.step(mission, "Adaptive Replanner", "revise mission graph after correlated signals arrived mid-execution") as step:
+                    mission = await self.operators.replan(
+                        mission,
+                        "New correlated signals arrived while the mission was running; spawn follow-up investigation over the expanded incident context.",
+                    )
+                    step.output_summary = f"Replan #{mission.replans}: expanded mission graph for {len(mission.signals)} correlated signals."
+                    self.store.update_mission(mission)
+
+                async with self.step(mission, "Follow-up Subagent", "investigate the revised mission graph before final verification") as step:
+                    mission = await self.operators.investigate(mission)
+                    step.output_summary = f"Follow-up collected additional evidence; total evidence={len(mission.evidence)}."
+                    step.metadata = {"evidence_count": len(mission.evidence)}
+                    self.store.update_mission(mission)
+
             async with self.step(mission, "Verification Gate", "score confidence and decide whether to replan") as step:
                 mission, needs_replan = await self.operators.verify(mission)
                 step.output_summary = f"Confidence={mission.confidence:.2f}; needs_replan={needs_replan}."

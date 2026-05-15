@@ -89,13 +89,13 @@ class OperatorSuite:
         needs_replan = mission.confidence < 0.72 and mission.replans < 1
         return mission, needs_replan
 
-    async def replan(self, mission: Mission) -> Mission:
+    async def replan(self, mission: Mission, reason: str | None = None) -> Mission:
         mission.replans += 1
         entities = ", ".join(self.entities(mission)) or "affected system"
         mission.hypotheses.append(
             Hypothesis(
                 title="Follow-up evidence gap investigation",
-                rationale=f"Confidence remained below threshold; spawn scoped search for independent evidence around {entities}.",
+                rationale=reason or f"Confidence remained below threshold; spawn scoped search for independent evidence around {entities}.",
                 confidence=0.3,
             )
         )

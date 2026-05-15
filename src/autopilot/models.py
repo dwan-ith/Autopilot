@@ -24,26 +24,51 @@ class Capability(str, Enum):
     NOTIFY = "notify"
 
 
+class AuthMode(str, Enum):
+    NONE = "none"
+    API_KEY = "api_key"
+    OAUTH = "oauth"
+    WEBHOOK = "webhook"
+    DEMO = "demo"
+
+
+class ConnectorStatus(str, Enum):
+    AVAILABLE = "available"
+    CONNECTED = "connected"
+    DISCONNECTED = "disconnected"
+
+
+class ActionRisk(str, Enum):
+    LOW = "low"
+    MEDIUM = "medium"
+    HIGH = "high"
+
+
 class MissionStatus(str, Enum):
     QUEUED = "queued"
     RUNNING = "running"
     WAITING = "waiting"
     COMPLETE = "complete"
     FAILED = "failed"
+    CANCELED = "canceled"
 
 
 class StepStatus(str, Enum):
     STARTED = "started"
     COMPLETE = "complete"
     FAILED = "failed"
+    CANCELED = "canceled"
 
 
 class GraphNodeKind(str, Enum):
     SIGNAL = "signal"
+    HYPOTHESIS = "hypothesis"
+    BRANCH = "branch"
     OPERATOR = "operator"
     REPLAN = "replan"
     ACTION = "action"
     POLICY = "policy"
+    VALIDATION = "validation"
 
 
 class ConnectorManifest(BaseModel):
@@ -56,6 +81,33 @@ class ConnectorManifest(BaseModel):
     auth_required: bool = False
 
 
+class ConnectorCatalogItem(BaseModel):
+    id: str
+    name: str
+    category: str
+    description: str
+    icon: str
+    auth_mode: AuthMode = AuthMode.OAUTH
+    capabilities: list[Capability]
+    event_types: list[str] = Field(default_factory=list)
+    scopes: list[str] = Field(default_factory=list)
+    safe_actions: list[str] = Field(default_factory=list)
+    implemented_actions: list[str] = Field(default_factory=list)
+    objects: list[str] = Field(default_factory=list)
+    demo_available: bool = True
+    implemented: bool = False
+
+
+class ConnectorConnection(BaseModel):
+    connector_id: str
+    status: ConnectorStatus = ConnectorStatus.DISCONNECTED
+    auth_mode: AuthMode = AuthMode.DEMO
+    granted_scopes: list[str] = Field(default_factory=list)
+    connected_at: datetime | None = None
+    credentials_ref: str | None = None
+    metadata: dict[str, Any] = Field(default_factory=dict)
+
+
 class Signal(BaseModel):
     id: str = Field(default_factory=lambda: new_id("sig"))
     source: str
@@ -64,6 +116,7 @@ class Signal(BaseModel):
     entities: list[str] = Field(default_factory=list)
     urgency: str = "medium"
     payload: dict[str, Any] = Field(default_factory=dict)
+    idempotency_key: str | None = None
     received_at: datetime = Field(default_factory=utc_now)
 
 
@@ -102,6 +155,8 @@ class PolicyDecision(BaseModel):
     action: str
     allowed: bool
     reason: str
+    risk: ActionRisk = ActionRisk.LOW
+    requires_validation: bool = False
     confidence_required: float = Field(default=0.0, ge=0.0, le=1.0)
     confidence_observed: float = Field(default=0.0, ge=0.0, le=1.0)
     created_at: datetime = Field(default_factory=utc_now)
@@ -113,6 +168,11 @@ class MissionGraphNode(BaseModel):
     title: str
     status: StepStatus = StepStatus.STARTED
     parent_ids: list[str] = Field(default_factory=list)
+    branch_id: str | None = None
+    attempt: int = 1
+    max_attempts: int = 1
+    retryable: bool = False
+    error: str | None = None
     summary: str = ""
     ref_id: str | None = None
     metadata: dict[str, Any] = Field(default_factory=dict)

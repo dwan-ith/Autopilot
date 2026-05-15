@@ -288,18 +288,36 @@ class OperatorSuite:
     async def publish_actions(self, mission: Mission, brief: str) -> list[ActionResult]:
         actions: list[ActionResult] = []
 
-        writers = self.registry.by_capability(Capability.WRITE)
+        writers = [connector for connector in self.registry.by_capability(Capability.WRITE) if "write_report" in connector.manifest.safe_actions]
         if writers:
-            decision = self.policy.decide(mission, writers[0], "write_report")
+            writer = writers[0]
+            decision = self.policy.decide(mission, writer, "write_report")
             mission.policy_decisions.append(decision)
             if decision.allowed:
                 actions.append(
-                    await writers[0].write(
+                    await writer.write(
                         f"mission-{mission.id}",
                         brief,
                         {"mission_id": mission.id, "confidence": mission.confidence},
                     )
                 )
+
+        action_connectors = self.registry.by_capability(Capability.ACTION)
+        packet_writers = [connector for connector in action_connectors if "write_action_packet" in connector.manifest.safe_actions]
+        if packet_writers:
+            packet = {
+                "mission_id": mission.id,
+                "title": mission.title,
+                "severity": mission.severity,
+                "confidence": mission.confidence,
+                "hypotheses": [hyp.model_dump() for hyp in mission.hypotheses],
+                "evidence_count": len(mission.evidence),
+                "recommended_action": self._recommended_action(mission),
+            }
+            decision = self.policy.decide(mission, packet_writers[0], "write_action_packet")
+            mission.policy_decisions.append(decision)
+            if decision.allowed:
+                actions.append(await packet_writers[0].action(f"action-packet-{mission.id}", packet))
 
         notifiers = self.registry.by_capability(Capability.NOTIFY)
         if notifiers:
@@ -320,6 +338,52 @@ class OperatorSuite:
                         status="blocked",
                         summary=decision.reason,
                         metadata={"policy_decision_id": decision.id},
+                    )
+                )
+
+        issue_connectors = [connector for connector in action_connectors if "create_issue" in connector.manifest.safe_actions]
+        for connector in issue_connectors:
+            decision = self.policy.decide(mission, connector, "create_issue")
+            mission.policy_decisions.append(decision)
+            if not decision.allowed:
+                actions.append(
+                    ActionResult(
+                        connector=connector.manifest.name,
+                        action="create_issue",
+                        status="blocked",
+                        summary=decision.reason,
+                        metadata={"policy_decision_id": decision.id},
+                    )
+                )
+                continue
+            actions.append(
+                await connector.action(
+                    "create_issue",
+                    {
+                        "mission_id": mission.id,
+                        "title": f"[AUTOPILOT] {mission.title[:120]}",
+                        "description": brief,
+                        "severity": mission.severity,
+                        "confidence": mission.confidence,
+                    },
+                )
+            )
+
+        callback_connectors = [connector for connector in action_connectors if "webhook_callback" in connector.manifest.safe_actions]
+        for connector in callback_connectors:
+            decision = self.policy.decide(mission, connector, "webhook_callback")
+            mission.policy_decisions.append(decision)
+            if decision.allowed:
+                actions.append(
+                    await connector.action(
+                        "webhook_callback",
+                        {
+                            "mission_id": mission.id,
+                            "title": mission.title,
+                            "severity": mission.severity,
+                            "confidence": mission.confidence,
+                            "status": "complete",
+                        },
                     )
                 )
 
@@ -441,6 +505,14 @@ Replans: {mission.replans}
 - Durable report write is allowed by the artifact connector.
 - Notification is allowed only when mission confidence passes policy.
 """
+
+    def _recommended_action(self, mission: Mission) -> str:
+        lead = max(mission.hypotheses, key=lambda item: item.confidence, default=None)
+        if lead and "regression" in lead.title.lower() and mission.confidence >= 0.72:
+            return "Prepare rollback or disable the affected feature flag."
+        if mission.severity in {"critical", "high"}:
+            return "Notify the owning team and create an owner-visible follow-up task."
+        return "Record the investigation and continue monitoring for additional signals."
 
     def _signal_lines(self, mission: Mission) -> str:
         return "\n".join(f"- [{s.source}/{s.type}] {s.summary}" for s in mission.signals)

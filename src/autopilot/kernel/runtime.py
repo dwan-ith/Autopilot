@@ -1,11 +1,13 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
+import json
 from contextlib import asynccontextmanager
 from typing import AsyncIterator
 
 from autopilot.connectors.base import ConnectorRegistry
-from autopilot.models import GraphNodeKind, Mission, MissionGraphNode, MissionStatus, OperatorStep, Signal, StepStatus, utc_now
+from autopilot.models import Capability, GraphNodeKind, Mission, MissionGraphNode, MissionStatus, OperatorStep, Signal, StepStatus, utc_now
 from autopilot.operators import OperatorSuite
 from autopilot.storage import Store
 from autopilot.tracing import TraceSink
@@ -22,7 +24,17 @@ class RuntimeKernel:
         self.correlation_window_seconds = correlation_window_seconds
 
     async def ingest(self, signal: Signal) -> Mission:
-        self.store.save_signal(signal)
+        signal.idempotency_key = signal.idempotency_key or self._signal_key(signal)
+        duplicate = self.store.mission_for_signal_key(signal.idempotency_key)
+        if duplicate:
+            self.tracer.emit(
+                duplicate.id,
+                "signal.duplicate",
+                "complete",
+                {"signal": signal.model_dump(), "idempotency_key": signal.idempotency_key},
+            )
+            return duplicate
+
         mission = self._correlate(signal)
         if mission:
             mission.signals.append(signal)
@@ -40,6 +52,7 @@ class RuntimeKernel:
             mission.status = MissionStatus.RUNNING
             mission.summary = f"Correlated new {signal.type} signal into existing mission."
             self.store.update_mission(mission)
+            self.store.save_signal(signal, mission.id)
             self.tracer.emit(mission.id, "signal.correlated", "complete", {"signal": signal.model_dump(), "mission": mission.id})
         else:
             mission = Mission(
@@ -81,6 +94,29 @@ class RuntimeKernel:
         for mission in self.store.active_missions():
             self.schedule(mission.id)
 
+    def cancel(self, mission_id: str, reason: str = "Canceled by operator request") -> bool:
+        mission = self.store.get_mission(mission_id)
+        if not mission:
+            return False
+        mission.status = MissionStatus.CANCELED
+        mission.summary = reason
+        mission.completed_at = utc_now()
+        mission.graph.append(
+            MissionGraphNode(
+                kind=GraphNodeKind.VALIDATION,
+                title="Mission canceled",
+                status=StepStatus.CANCELED,
+                summary=reason,
+                completed_at=utc_now(),
+            )
+        )
+        self.store.update_mission(mission)
+        task = self._tasks.get(mission_id)
+        if task and not task.done():
+            task.cancel()
+        self.tracer.emit(mission_id, "mission.canceled", "canceled", {"reason": reason})
+        return True
+
     async def run_mission(self, mission_id: str) -> None:
         lock = self._mission_locks.setdefault(mission_id, asyncio.Lock())
         async with lock:
@@ -89,6 +125,8 @@ class RuntimeKernel:
     async def _run_mission_locked(self, mission_id: str) -> None:
         mission = self.store.get_mission(mission_id)
         if not mission:
+            return
+        if mission.status == MissionStatus.CANCELED:
             return
         try:
             mission.status = MissionStatus.RUNNING
@@ -106,12 +144,17 @@ class RuntimeKernel:
                 mission = await self.operators.plan_mission(mission)
                 step.output_summary = f"Spawned {len(mission.hypotheses)} hypotheses."
                 step.metadata = {"hypotheses": [hyp.model_dump() for hyp in mission.hypotheses]}
+                self._append_hypothesis_nodes(mission)
                 self.store.update_mission(mission)
 
             async with self.step(mission, "Dynamic Subagents", "investigate hypotheses through capability-routed connectors") as step:
                 mission = await self.operators.investigate(mission)
                 step.output_summary = f"Collected {len(mission.evidence)} evidence item(s)."
-                step.metadata = {"evidence": [ev.model_dump() for ev in mission.evidence]}
+                step.metadata = {
+                    "evidence": [ev.model_dump() for ev in mission.evidence],
+                    "searched_connectors": [connector.manifest.name for connector in self.registry.by_capability(Capability.SEARCH)],
+                }
+                self._append_branch_nodes(mission)
                 self.store.update_mission(mission)
 
             mission = self.store.get_mission(mission_id) or mission
@@ -125,6 +168,7 @@ class RuntimeKernel:
                         "New correlated signals arrived while the mission was running; spawn follow-up investigation over the expanded incident context.",
                     )
                     step.output_summary = f"Replan #{mission.replans}: expanded mission graph for {len(mission.signals)} correlated signals."
+                    self._append_hypothesis_nodes(mission)
                     self.store.update_mission(mission)
 
                 async with self.step(mission, "Follow-up Subagent", "investigate the revised mission graph before final verification") as step:
@@ -143,6 +187,7 @@ class RuntimeKernel:
                 async with self.step(mission, "Adaptive Replanner", "spawn follow-up branch because confidence is below threshold") as step:
                     mission = await self.operators.replan(mission)
                     step.output_summary = f"Replan #{mission.replans}: added follow-up evidence branch."
+                    self._append_hypothesis_nodes(mission)
                     self.store.update_mission(mission)
 
                 async with self.step(mission, "Follow-up Subagent", "run targeted investigation from revised mission graph") as step:
@@ -164,12 +209,16 @@ class RuntimeKernel:
                     "actions": [action.model_dump() for action in mission.actions],
                     "policy_decisions": [decision.model_dump() for decision in mission.policy_decisions],
                 }
+                self._append_action_nodes(mission)
                 mission.status = MissionStatus.COMPLETE
                 mission.completed_at = utc_now()
                 self.store.update_mission(mission)
                 self.store.remember("mission_resolution", f"{mission.title}: confidence {mission.confidence:.2f}; actions {len(mission.actions)}")
 
             self.tracer.emit(mission.id, "mission.complete", "complete", {"confidence": mission.confidence, "actions": len(mission.actions)})
+        except asyncio.CancelledError:
+            self.tracer.emit(mission_id, "mission.canceled", "canceled", {"reason": "Runtime task canceled"})
+            return
         except Exception as exc:
             mission = self.store.get_mission(mission_id) or mission
             mission.status = MissionStatus.FAILED
@@ -226,3 +275,83 @@ class RuntimeKernel:
     def _title_for(self, signal: Signal) -> str:
         subject = signal.entities[0] if signal.entities else signal.type.replace("_", " ")
         return f"{subject}: {signal.summary[:80]}"
+
+    def _signal_key(self, signal: Signal) -> str:
+        payload = {
+            "source": signal.source,
+            "type": signal.type,
+            "summary": signal.summary.strip().lower(),
+            "entities": sorted(entity.strip().lower() for entity in signal.entities),
+        }
+        digest = hashlib.sha256(json.dumps(payload, sort_keys=True).encode("utf-8")).hexdigest()[:20]
+        return f"{signal.source}:{signal.type}:{digest}"
+
+    def _append_hypothesis_nodes(self, mission: Mission) -> None:
+        existing_refs = {node.ref_id for node in mission.graph if node.kind == GraphNodeKind.HYPOTHESIS}
+        parents = [node.id for node in mission.graph if node.kind == GraphNodeKind.SIGNAL]
+        for hypothesis in mission.hypotheses:
+            if hypothesis.id in existing_refs:
+                continue
+            mission.graph.append(
+                MissionGraphNode(
+                    kind=GraphNodeKind.HYPOTHESIS,
+                    title=hypothesis.title,
+                    status=StepStatus.COMPLETE,
+                    parent_ids=parents,
+                    branch_id=hypothesis.id,
+                    ref_id=hypothesis.id,
+                    summary=hypothesis.rationale,
+                    completed_at=utc_now(),
+                    metadata={"confidence": hypothesis.confidence, "status": hypothesis.status},
+                )
+            )
+
+    def _append_branch_nodes(self, mission: Mission) -> None:
+        existing_refs = {node.ref_id for node in mission.graph if node.kind == GraphNodeKind.BRANCH}
+        for hypothesis in mission.hypotheses:
+            ref = f"branch:{hypothesis.id}:{len(hypothesis.evidence_ids)}"
+            if ref in existing_refs:
+                continue
+            mission.graph.append(
+                MissionGraphNode(
+                    kind=GraphNodeKind.BRANCH,
+                    title=f"Investigation branch: {hypothesis.title}",
+                    status=StepStatus.COMPLETE,
+                    parent_ids=[node.id for node in mission.graph if node.ref_id == hypothesis.id],
+                    branch_id=hypothesis.id,
+                    ref_id=ref,
+                    summary=f"Collected {len(hypothesis.evidence_ids)} linked evidence item(s).",
+                    completed_at=utc_now(),
+                    metadata={"evidence_ids": hypothesis.evidence_ids},
+                )
+            )
+
+    def _append_action_nodes(self, mission: Mission) -> None:
+        existing_refs = {node.ref_id for node in mission.graph if node.kind in {GraphNodeKind.ACTION, GraphNodeKind.POLICY}}
+        for decision in mission.policy_decisions:
+            if decision.id not in existing_refs:
+                mission.graph.append(
+                    MissionGraphNode(
+                        kind=GraphNodeKind.POLICY,
+                        title=f"Policy: {decision.connector}.{decision.action}",
+                        status=StepStatus.COMPLETE,
+                        ref_id=decision.id,
+                        summary=decision.reason,
+                        completed_at=utc_now(),
+                        metadata=decision.model_dump(),
+                    )
+                )
+        for action in mission.actions:
+            if action.id not in existing_refs:
+                status = StepStatus.COMPLETE if action.status in {"complete", "skipped"} else StepStatus.FAILED
+                mission.graph.append(
+                    MissionGraphNode(
+                        kind=GraphNodeKind.ACTION,
+                        title=f"Action: {action.connector}.{action.action}",
+                        status=status,
+                        ref_id=action.id,
+                        summary=action.summary,
+                        completed_at=utc_now(),
+                        metadata=action.model_dump(),
+                    )
+                )

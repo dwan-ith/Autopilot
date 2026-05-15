@@ -94,7 +94,7 @@ h4 {
   flex-wrap: wrap;
 }
 
-.primary, .secondary {
+.primary, .secondary, .mini-action {
   border: 1px solid var(--line);
   border-radius: 6px;
   padding: 9px 13px;
@@ -111,6 +111,12 @@ h4 {
 
 .secondary {
   background: transparent;
+}
+
+.mini-action {
+  background: transparent;
+  padding: 3px 8px;
+  font-size: 11px;
 }
 
 .primary:disabled {
@@ -179,6 +185,24 @@ h4 {
   padding: 12px;
 }
 
+.connector-toolbar {
+  display: grid;
+  grid-template-columns: 1fr;
+  gap: 8px;
+  padding: 12px 12px 0;
+}
+
+.connector-toolbar input,
+.connector-toolbar select {
+  width: 100%;
+  border: 1px solid var(--line);
+  border-radius: 7px;
+  background: #0d1218;
+  color: var(--text);
+  padding: 9px 10px;
+  font: inherit;
+}
+
 .mission-card {
   display: block;
   width: 100%;
@@ -240,6 +264,46 @@ h4 {
   background: var(--card);
   padding: 10px;
   margin-bottom: 8px;
+}
+
+.connector.connected {
+  border-color: rgba(76, 201, 168, 0.55);
+}
+
+.connector-top {
+  display: grid;
+  grid-template-columns: 36px 1fr auto auto;
+  gap: 10px;
+  align-items: center;
+  margin-bottom: 8px;
+}
+
+.connector-icon {
+  display: grid;
+  place-items: center;
+  width: 34px;
+  height: 34px;
+  border-radius: 8px;
+  background: #0d1218;
+  color: var(--accent);
+  border: 1px solid var(--line);
+  font-family: var(--mono);
+  font-weight: 800;
+  font-size: 11px;
+}
+
+.connector-action {
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: transparent;
+  color: var(--text);
+  padding: 6px 8px;
+  cursor: pointer;
+  font-size: 12px;
+}
+
+.connector-action:hover {
+  border-color: var(--accent);
 }
 
 .connector-name, .info-card strong, .timeline-node strong {

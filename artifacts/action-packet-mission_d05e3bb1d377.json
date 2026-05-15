@@ -1,0 +1,32 @@
+{
+  "mission_id": "mission_d05e3bb1d377",
+  "title": "checkout: Checkout latency p95 is above SLA.",
+  "severity": "high",
+  "confidence": 0.96,
+  "hypotheses": [
+    {
+      "id": "hyp_41e86c492fd1",
+      "title": "Customer-impacting operational incident",
+      "rationale": "The signal may affect a customer or SLA and needs an action packet even if root cause is uncertain.",
+      "confidence": 0.9107999999999999,
+      "evidence_ids": [
+        "ev_4d1c8e94932a",
+        "ev_cae32232baff"
+      ],
+      "status": "open"
+    },
+    {
+      "id": "hyp_89c035fc9573",
+      "title": "Service health or dependency degradation",
+      "rationale": "The symptoms include errors, latency, status changes, or dependency behavior.",
+      "confidence": 0.8862,
+      "evidence_ids": [
+        "ev_ea9049b68dc0",
+        "ev_15ec6d75c4cf"
+      ],
+      "status": "open"
+    }
+  ],
+  "evidence_count": 2,
+  "recommended_action": "Notify the owning team and create an owner-visible follow-up task."
+}

@@ -8,7 +8,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-from autopilot.models import Mission, MissionStatus, OperatorStep, Signal, utc_now
+from autopilot.models import AuthMode, ConnectorConnection, ConnectorStatus, Mission, MissionStatus, OperatorStep, Signal, utc_now
 
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -65,6 +65,7 @@ class Store:
                     summary text not null,
                     entities text not null,
                     urgency text not null,
+                    idempotency_key text,
                     payload text not null,
                     received_at text not null
                 );
@@ -96,16 +97,39 @@ class Store:
                     value text not null,
                     created_at text not null
                 );
+                create table if not exists connector_connections (
+                    connector_id text primary key,
+                    status text not null,
+                    auth_mode text not null,
+                    granted_scopes text not null,
+                    connected_at text,
+                    credentials_ref text,
+                    metadata text not null
+                );
                 """
             )
+            self._ensure_column(conn, "signals", "idempotency_key", "text")
+            self._ensure_column(conn, "connector_connections", "credentials_ref", "text")
+            conn.execute(
+                """
+                create unique index if not exists idx_signals_idempotency
+                    on signals(idempotency_key)
+                    where idempotency_key is not null
+                """
+            )
+
+    def _ensure_column(self, conn: sqlite3.Connection, table: str, column: str, ddl: str) -> None:
+        columns = {row["name"] for row in conn.execute(f"pragma table_info({table})").fetchall()}
+        if column not in columns:
+            conn.execute(f"alter table {table} add column {column} {ddl}")
 
     def save_signal(self, signal: Signal, mission_id: str | None = None) -> None:
         with self._lock, closing(self.connect()) as conn, conn:
             conn.execute(
                 """
                 insert or replace into signals
-                (id, mission_id, source, type, summary, entities, urgency, payload, received_at)
-                values (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                (id, mission_id, source, type, summary, entities, urgency, idempotency_key, payload, received_at)
+                values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     signal.id,
@@ -115,6 +139,7 @@ class Store:
                     signal.summary,
                     json.dumps(signal.entities),
                     signal.urgency,
+                    signal.idempotency_key,
                     json.dumps(signal.payload, default=_json_default),
                     signal.received_at.isoformat(),
                 ),
@@ -203,6 +228,22 @@ class Store:
             ).fetchall()
         return [Mission.model_validate_json(row["payload"]) for row in rows]
 
+    def mission_for_signal_key(self, idempotency_key: str | None) -> Mission | None:
+        if not idempotency_key:
+            return None
+        with self._lock, closing(self.connect()) as conn, conn:
+            row = conn.execute(
+                """
+                select m.payload
+                from signals s
+                join missions m on m.id = s.mission_id
+                where s.idempotency_key=?
+                limit 1
+                """,
+                (idempotency_key,),
+            ).fetchone()
+        return Mission.model_validate_json(row["payload"]) if row else None
+
     def add_step(self, step: OperatorStep) -> None:
         with self._lock, closing(self.connect()) as conn, conn:
             conn.execute(
@@ -276,3 +317,56 @@ class Store:
                 (f"%{key_like}%", limit),
             ).fetchall()
         return [row["value"] for row in rows]
+
+    def list_connector_connections(self) -> list[ConnectorConnection]:
+        with self._lock, closing(self.connect()) as conn, conn:
+            rows = conn.execute("select * from connector_connections order by connector_id").fetchall()
+        return [
+            ConnectorConnection(
+                connector_id=row["connector_id"],
+                status=ConnectorStatus(row["status"]),
+                auth_mode=AuthMode(row["auth_mode"]),
+                granted_scopes=json.loads(row["granted_scopes"]),
+                connected_at=datetime.fromisoformat(row["connected_at"]) if row["connected_at"] else None,
+                credentials_ref=row["credentials_ref"],
+                metadata=json.loads(row["metadata"]),
+            )
+            for row in rows
+        ]
+
+    def get_connector_connection(self, connector_id: str) -> ConnectorConnection | None:
+        with self._lock, closing(self.connect()) as conn, conn:
+            row = conn.execute(
+                "select * from connector_connections where connector_id=?",
+                (connector_id,),
+            ).fetchone()
+        if not row:
+            return None
+        return ConnectorConnection(
+            connector_id=row["connector_id"],
+            status=ConnectorStatus(row["status"]),
+            auth_mode=AuthMode(row["auth_mode"]),
+            granted_scopes=json.loads(row["granted_scopes"]),
+            connected_at=datetime.fromisoformat(row["connected_at"]) if row["connected_at"] else None,
+            credentials_ref=row["credentials_ref"],
+            metadata=json.loads(row["metadata"]),
+        )
+
+    def save_connector_connection(self, connection: ConnectorConnection) -> None:
+        with self._lock, closing(self.connect()) as conn, conn:
+            conn.execute(
+                """
+                insert or replace into connector_connections
+                (connector_id, status, auth_mode, granted_scopes, connected_at, credentials_ref, metadata)
+                values (?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    connection.connector_id,
+                    connection.status.value,
+                    connection.auth_mode.value,
+                    json.dumps(connection.granted_scopes),
+                    connection.connected_at.isoformat() if connection.connected_at else None,
+                    connection.credentials_ref,
+                    json.dumps(connection.metadata, default=_json_default),
+                ),
+            )

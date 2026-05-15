@@ -2,6 +2,7 @@
 
 let selectedMissionId = null;
 let eventSource = null;
+let connectorDirectory = [];
 
 const $ = (id) => document.getElementById(id);
 
@@ -28,17 +29,58 @@ async function loadProvider() {
 }
 
 async function renderConnectors() {
-  const connectors = await fetchJson("/api/connectors");
+  connectorDirectory = await fetchJson("/api/connector-directory");
+  const categories = Array.from(new Set(connectorDirectory.map((connector) => connector.category))).sort();
+  $("connectorCategory").innerHTML = `<option value="">All categories</option>` +
+    categories.map((category) => `<option value="${esc(category)}">${esc(category)}</option>`).join("");
+  renderConnectorCards();
+}
+
+function renderConnectorCards() {
+  const query = ($("connectorSearch").value || "").toLowerCase();
+  const category = $("connectorCategory").value || "";
+  const connectors = connectorDirectory.filter((connector) => {
+    const text = `${connector.name} ${connector.description} ${connector.category}`.toLowerCase();
+    return (!query || text.includes(query)) && (!category || connector.category === category);
+  });
+
   $("connectors").innerHTML = connectors.map((connector) => `
-    <div class="connector">
-      <div class="connector-name">${esc(connector.name)}</div>
+    <article class="connector ${connector.status}">
+      <div class="connector-top">
+        <span class="connector-icon">${esc(connector.icon)}</span>
+        <div>
+          <div class="connector-name">${esc(connector.name)}</div>
+          <div class="muted">${esc(connector.category)} | ${esc(connector.auth_mode)}</div>
+        </div>
+        ${badge(connector.implemented ? "runtime" : "catalog", connector.implemented ? "complete" : "queued")}
+        <button class="connector-action" data-id="${esc(connector.id)}" data-status="${esc(connector.status)}">
+          ${connector.status === "connected" ? "Disconnect" : "Connect"}
+        </button>
+      </div>
       <div class="muted">${esc(connector.description)}</div>
       <div class="chips">
         ${(connector.capabilities || []).map((cap) => `<span>${esc(cap)}</span>`).join("")}
       </div>
-      <div class="muted">safe: ${(connector.safe_actions || []).map(esc).join(", ") || "none"}</div>
-    </div>
-  `).join("");
+      <div class="muted">objects: ${(connector.objects || []).map(esc).join(", ") || "none"}</div>
+      <div class="muted">safe actions: ${(connector.safe_actions || []).map(esc).join(", ") || "none"}</div>
+      <div class="muted">implemented actions: ${(connector.implemented_actions || []).map(esc).join(", ") || "none yet"}</div>
+      ${connector.credentials_ref ? `<div class="muted">credentials ref: ${esc(connector.credentials_ref)}</div>` : ""}
+    </article>
+  `).join("") || empty("No connectors found.");
+
+  document.querySelectorAll(".connector-action").forEach((button) => {
+    button.addEventListener("click", async () => {
+      const id = button.dataset.id;
+      const connected = button.dataset.status === "connected";
+      button.disabled = true;
+      await fetchJson(`/api/connector-directory/${id}/${connected ? "disconnect" : "connect"}`, {
+        method: "POST",
+        headers: {"Content-Type": "application/json"},
+        body: connected ? undefined : JSON.stringify({auth_mode: "demo"}),
+      });
+      await renderConnectors();
+    });
+  });
 }
 
 function renderMissions(missions) {
@@ -84,6 +126,7 @@ async function selectMission(id) {
         ${badge(`confidence ${Math.round(mission.confidence * 100)}%`)}
         ${badge(`${mission.signals.length} signals`)}
         ${badge(`${mission.replans} replans`)}
+        ${["queued", "running", "waiting"].includes(mission.status) ? `<button class="mini-action" data-cancel="${esc(mission.id)}">Cancel</button>` : ""}
       </div>
       <p class="muted">${esc(mission.summary)}</p>
     </div>
@@ -95,6 +138,17 @@ async function selectMission(id) {
     ${section("Policy", renderPolicy(mission.policy_decisions || []))}
     ${section("Actions", renderActions(mission.actions || []))}
   `;
+
+  document.querySelectorAll("[data-cancel]").forEach((button) => {
+    button.addEventListener("click", async () => {
+      await fetchJson(`/api/missions/${button.dataset.cancel}/cancel`, {
+        method: "POST",
+        headers: {"Content-Type": "application/json"},
+        body: JSON.stringify({reason: "Canceled from dashboard"}),
+      });
+      await refresh();
+    });
+  });
 
   renderTraces(data.traces || []);
 }
@@ -146,7 +200,7 @@ function renderPolicy(decisions) {
   return decisions.map((decision) => card(
     `${decision.allowed ? "allowed" : "blocked"}: ${decision.connector}.${decision.action}`,
     decision.reason,
-    `required ${decision.confidence_required.toFixed(2)} | observed ${decision.confidence_observed.toFixed(2)}`
+    `risk ${esc(decision.risk)} | validation ${decision.requires_validation ? "required" : "not required"} | required ${decision.confidence_required.toFixed(2)} | observed ${decision.confidence_observed.toFixed(2)}`
   )).join("") || empty("No policy decisions yet.");
 }
 
@@ -197,6 +251,8 @@ $("demoBtn").addEventListener("click", async () => {
 });
 
 $("refreshBtn").addEventListener("click", refresh);
+$("connectorSearch").addEventListener("input", renderConnectorCards);
+$("connectorCategory").addEventListener("change", renderConnectorCards);
 
 function updateRuntimeStatus(missions) {
   const active = missions.some((mission) => ["queued", "running", "waiting"].includes(mission.status));

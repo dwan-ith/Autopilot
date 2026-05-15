@@ -1,28 +1,56 @@
 from __future__ import annotations
 
 from autopilot.connectors.base import Connector
-from autopilot.models import Mission, PolicyDecision
+from autopilot.models import ActionRisk, Mission, PolicyDecision
 
 
 class PolicyEngine:
-    """Policy-bounds actions before connectors produce side effects."""
+    """Policy-bounds actions before connectors produce side effects.
 
-    def __init__(self, min_external_notify_confidence: float = 0.55):
-        self.min_external_notify_confidence = min_external_notify_confidence
+    The runtime treats connector actions as a constrained capability system:
+    each action has a risk class, confidence threshold, and optional validation
+    requirement. Connectors still declare their own safe action surface, so both
+    runtime policy and connector capability must agree before a side effect runs.
+    """
+
+    ACTION_RULES: dict[str, tuple[ActionRisk, float, bool]] = {
+        "write_report": (ActionRisk.LOW, 0.0, False),
+        "write_action_packet": (ActionRisk.LOW, 0.0, False),
+        "notify_ops": (ActionRisk.MEDIUM, 0.55, False),
+        "webhook_callback": (ActionRisk.MEDIUM, 0.6, False),
+        "create_issue": (ActionRisk.MEDIUM, 0.72, True),
+        "post_message": (ActionRisk.MEDIUM, 0.65, False),
+        "mark_investigating": (ActionRisk.LOW, 0.45, False),
+    }
+
+    def __init__(self, high_risk_requires_human: bool = True):
+        self.high_risk_requires_human = high_risk_requires_human
 
     def decide(self, mission: Mission, connector: Connector, action: str) -> PolicyDecision:
+        risk, required, requires_validation = self.ACTION_RULES.get(action, (ActionRisk.HIGH, 0.85, True))
+
         if action not in connector.manifest.safe_actions:
             return PolicyDecision(
                 connector=connector.manifest.name,
                 action=action,
                 allowed=False,
                 reason=f"Action '{action}' is not declared safe by connector '{connector.manifest.name}'.",
+                risk=risk,
+                requires_validation=requires_validation,
                 confidence_observed=mission.confidence,
             )
 
-        required = 0.0
-        if connector.manifest.name == "notification":
-            required = self.min_external_notify_confidence
+        if risk == ActionRisk.HIGH and self.high_risk_requires_human:
+            return PolicyDecision(
+                connector=connector.manifest.name,
+                action=action,
+                allowed=False,
+                reason="High-risk actions require explicit human approval in this demo policy.",
+                risk=risk,
+                requires_validation=True,
+                confidence_required=required,
+                confidence_observed=mission.confidence,
+            )
 
         if mission.confidence < required:
             return PolicyDecision(
@@ -30,6 +58,8 @@ class PolicyEngine:
                 action=action,
                 allowed=False,
                 reason=f"Mission confidence {mission.confidence:.2f} is below required {required:.2f}.",
+                risk=risk,
+                requires_validation=requires_validation,
                 confidence_required=required,
                 confidence_observed=mission.confidence,
             )
@@ -38,7 +68,12 @@ class PolicyEngine:
             connector=connector.manifest.name,
             action=action,
             allowed=True,
-            reason="Action is connector-declared safe and confidence policy passed.",
+            reason=(
+                "Action is connector-declared safe and confidence policy passed"
+                + ("; validation is required after execution." if requires_validation else ".")
+            ),
+            risk=risk,
+            requires_validation=requires_validation,
             confidence_required=required,
             confidence_observed=mission.confidence,
         )

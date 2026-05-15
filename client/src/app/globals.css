@@ -1,0 +1,55 @@
+@import "tailwindcss";
+
+@theme {
+  --color-background: #080b10;
+  --color-foreground: #e6edf3;
+  --color-card: rgba(13, 17, 23, 0.7);
+  --color-card-foreground: #e6edf3;
+  --color-popover: #080b10;
+  --color-popover-foreground: #e6edf3;
+  --color-primary: #3fb8af;
+  --color-primary-foreground: #ffffff;
+  --color-secondary: #7b68ee;
+  --color-secondary-foreground: #ffffff;
+  --color-muted: #768390;
+  --color-muted-foreground: #768390;
+  --color-accent: rgba(63, 184, 175, 0.1);
+  --color-accent-foreground: #3fb8af;
+  --color-destructive: #f85149;
+  --color-destructive-foreground: #ffffff;
+  --color-border: rgba(48, 63, 82, 0.4);
+  --color-input: rgba(48, 63, 82, 0.4);
+  --color-ring: #3fb8af;
+}
+
+@layer base {
+  * {
+    @apply border-border;
+  }
+  body {
+    @apply bg-background text-foreground font-sans antialiased;
+    background-image: 
+      radial-gradient(circle at 50% 0%, rgba(123, 104, 238, 0.05) 0%, transparent 50%),
+      radial-gradient(circle at 0% 100%, rgba(63, 184, 175, 0.03) 0%, transparent 40%);
+    background-attachment: fixed;
+  }
+}
+
+.glass {
+  @apply backdrop-blur-xl bg-card border border-border;
+}
+
+.logo-gradient {
+  background: linear-gradient(135deg, #3fb8af 0%, #7b68ee 100%);
+  -webkit-background-clip: text;
+  -webkit-text-fill-color: transparent;
+}
+
+.noise {
+  position: fixed;
+  inset: 0;
+  z-index: 50;
+  pointer-events: none;
+  opacity: 0.015;
+  background-image: url("data:image/svg+xml,%3Csvg viewBox='0 0 256 256' xmlns='http://www.w3.org/2000/svg'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.65' numOctaves='3' stitchTiles='stitch'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23n)'/%3E%3C/svg%3E");
+}

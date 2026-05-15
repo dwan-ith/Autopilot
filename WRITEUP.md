@@ -2,13 +2,26 @@
 
 ## Problem
 
-Teams operate across many connected systems. Signals arrive through support tools, monitoring tools, docs, chat, status pages, and internal APIs. Humans still perform the expensive middle step: deciding whether an event matters, correlating it with other evidence, investigating likely causes, choosing bounded actions, and documenting the outcome.
+Modern teams operate through connected systems: support tools, monitoring,
+chat, docs, issue trackers, status feeds, and internal APIs. Signals arrive
+continuously, but the expensive middle work is still manual: triage, correlate,
+investigate, decide what can be done safely, and document the outcome.
 
-AUTOPILOT is an Autonomous Operator Runtime that turns connected-system events into verified actions.
+AUTOPILOT is an Autonomous Operator Runtime that turns connected-system events
+into verified, policy-bounded actions.
+
+## Product
+
+AUTOPILOT is connector-agnostic. A connector declares capabilities and safe
+actions. The runtime reasons over those capabilities rather than hardcoding one
+application workflow.
+
+The MVP includes webhook, knowledge, artifact, and notification connectors. It
+can ingest arbitrary operational events, correlate related signals, run scoped
+operators, adapt the mission graph when new evidence arrives, and publish local
+artifacts or notifications.
 
 ## Architecture
-
-The system is connector-agnostic. Connectors declare capabilities such as read, search, write, notify, and action. Events are normalized into Signals. The runtime correlates signals into Missions, then creates a mission graph of operator steps.
 
 Core components:
 
@@ -16,28 +29,45 @@ Core components:
 - Normalized object model
 - SQLite persistence
 - Runtime kernel
-- Dynamic scoped operators
+- Mission graph
+- Scoped operators
 - Capability router
-- Policy-bounded action layer
-- Local/Omium-ready trace sink
+- Policy engine
+- Trace sink
 
-## Autonomous Behavior
+The runtime persists every mission, signal, operator step, policy decision,
+action, and trace event. SQLite runs with explicit connection handling and WAL
+mode for better local demo concurrency.
+
+## Autonomy
 
 AUTOPILOT demonstrates autonomy through:
 
-- Event-driven mission creation
-- Correlation of multiple asynchronous signals
-- Dynamic hypothesis generation
-- Parallel evidence collection through capability-routed connectors
-- Verification confidence scoring
-- Adaptive replanning when confidence is below threshold
-- Bounded action publishing without human steering
-- Persistent mission memory and trace logs
+- webhook-driven mission creation
+- asynchronous correlation of related signals
+- dynamic hypothesis generation
+- capability-routed evidence collection
+- verification confidence scoring
+- adaptive replanning on new correlated signals or weak evidence
+- policy-gated side effects without human steering
+- durable memory and trace logs
 
 ## Demo
 
-The demo fires an enterprise support escalation, followed by monitoring and rollout-status events. AUTOPILOT correlates the events into one mission, investigates likely hypotheses, replans if confidence is insufficient, writes an action brief, and sends an operations notification through Slack or local fallback.
+The demo fires three events:
+
+1. an enterprise support escalation
+2. a monitoring error spike
+3. a rollout status event
+
+AUTOPILOT correlates them into one mission, expands the mission graph, launches
+a follow-up investigation branch, verifies confidence, writes a mission brief,
+and emits a notification action. The dashboard shows the graph, hypotheses,
+evidence, policy decisions, actions, and traces.
 
 ## Safety
 
-AUTOPILOT is policy-bounded. Connectors advertise safe actions, and the MVP only allows local artifact writes and notification actions. Riskier actions can be added later behind validation and permission policies.
+AUTOPILOT is policy-bounded. Connectors declare safe actions, and the runtime
+creates an explicit policy decision before each side effect. In the MVP, only
+local artifact writes and notifications are enabled. Riskier actions can be
+added behind stricter confidence thresholds and validation steps.

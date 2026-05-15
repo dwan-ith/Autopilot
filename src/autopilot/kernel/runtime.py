@@ -2,11 +2,10 @@ from __future__ import annotations
 
 import asyncio
 from contextlib import asynccontextmanager
-from datetime import datetime
 from typing import AsyncIterator
 
 from autopilot.connectors.base import ConnectorRegistry
-from autopilot.models import Mission, MissionStatus, OperatorStep, Signal, StepStatus, utc_now
+from autopilot.models import GraphNodeKind, Mission, MissionGraphNode, MissionStatus, OperatorStep, Signal, StepStatus, utc_now
 from autopilot.operators import OperatorSuite
 from autopilot.storage import Store
 from autopilot.tracing import TraceSink
@@ -19,24 +18,44 @@ logger = logging.getLogger(__name__)
 
 
 class RuntimeKernel:
+<<<<<<< HEAD
     def __init__(self, store: Store, registry: ConnectorRegistry, maas_registry: MAASConnectorRegistry | None = None):
+=======
+    def __init__(self, store: Store, registry: ConnectorRegistry, correlation_window_seconds: float = 0.45):
+>>>>>>> 7e86d18fb019511de1ac9377bbddc4d936f91751
         self.store = store
         self.registry = registry
         self.operators = OperatorSuite(registry)
         self.tracer = TraceSink(store)
         self._tasks: dict[str, asyncio.Task] = {}
+<<<<<<< HEAD
         self.agent_registry = maas_registry
         self._agent_queue: asyncio.Queue[AgentTask] = asyncio.Queue()
         self.orchestrator: OrchestratorAgent | None = None
         if maas_registry is not None:
             self.orchestrator = OrchestratorAgent(maas_registry, store, self._agent_queue)
         self._agent_worker_task: asyncio.Task | None = None
+=======
+        self._mission_locks: dict[str, asyncio.Lock] = {}
+        self.correlation_window_seconds = correlation_window_seconds
+>>>>>>> 7e86d18fb019511de1ac9377bbddc4d936f91751
 
     async def ingest(self, signal: Signal) -> Mission:
         self.store.save_signal(signal)
         mission = self._correlate(signal)
         if mission:
             mission.signals.append(signal)
+            mission.graph.append(
+                MissionGraphNode(
+                    kind=GraphNodeKind.SIGNAL,
+                    title=f"Correlated signal: {signal.type}",
+                    status=StepStatus.COMPLETE,
+                    summary=signal.summary,
+                    ref_id=signal.id,
+                    completed_at=utc_now(),
+                    metadata={"source": signal.source, "entities": signal.entities},
+                )
+            )
             mission.status = MissionStatus.RUNNING
             mission.summary = f"Correlated new {signal.type} signal into existing mission."
             self.store.update_mission(mission)
@@ -48,6 +67,17 @@ class RuntimeKernel:
                 severity=signal.urgency,
                 summary=signal.summary,
                 signals=[signal],
+                graph=[
+                    MissionGraphNode(
+                        kind=GraphNodeKind.SIGNAL,
+                        title=f"Initial signal: {signal.type}",
+                        status=StepStatus.COMPLETE,
+                        summary=signal.summary,
+                        ref_id=signal.id,
+                        completed_at=utc_now(),
+                        metadata={"source": signal.source, "entities": signal.entities},
+                    )
+                ],
             )
             self.store.create_mission(mission)
             self.tracer.emit(mission.id, "mission.created", "complete", {"signal": signal.model_dump()})
@@ -131,11 +161,21 @@ class RuntimeKernel:
             return
         self._tasks[mission_id] = asyncio.create_task(self.run_mission(mission_id))
 
+    async def wait_for(self, mission_id: str) -> None:
+        task = self._tasks.get(mission_id)
+        if task:
+            await task
+
     def resume_active(self) -> None:
         for mission in self.store.active_missions():
             self.schedule(mission.id)
 
     async def run_mission(self, mission_id: str) -> None:
+        lock = self._mission_locks.setdefault(mission_id, asyncio.Lock())
+        async with lock:
+            await self._run_mission_locked(mission_id)
+
+    async def _run_mission_locked(self, mission_id: str) -> None:
         mission = self.store.get_mission(mission_id)
         if not mission:
             return
@@ -143,6 +183,8 @@ class RuntimeKernel:
             mission.status = MissionStatus.RUNNING
             self.store.update_mission(mission)
             self.tracer.emit(mission.id, "runtime.dispatch", "started", {"mission": mission.title})
+            await asyncio.sleep(self.correlation_window_seconds)
+            mission = self.store.get_mission(mission_id) or mission
 
             async with self.step(mission, "Signal Evaluator", "classify severity, entities, and operational importance") as step:
                 mission = await self.operators.evaluate_signal(mission)
@@ -207,7 +249,10 @@ class RuntimeKernel:
             async with self.step(mission, "Action Publisher", "execute bounded writes and notifications") as step:
                 mission.actions.extend(await self.operators.publish_actions(mission, brief))
                 step.output_summary = f"Executed {len(mission.actions)} bounded action(s)."
-                step.metadata = {"actions": [action.model_dump() for action in mission.actions]}
+                step.metadata = {
+                    "actions": [action.model_dump() for action in mission.actions],
+                    "policy_decisions": [decision.model_dump() for decision in mission.policy_decisions],
+                }
                 mission.status = MissionStatus.COMPLETE
                 mission.completed_at = utc_now()
                 self.store.update_mission(mission)
@@ -224,18 +269,35 @@ class RuntimeKernel:
     @asynccontextmanager
     async def step(self, mission: Mission, name: str, role: str) -> AsyncIterator[OperatorStep]:
         step = OperatorStep(mission_id=mission.id, name=name, role=role, input_summary=mission.summary)
+        graph_node = MissionGraphNode(
+            kind=GraphNodeKind.REPLAN if "Replanner" in name else GraphNodeKind.OPERATOR,
+            title=name,
+            ref_id=step.id,
+            summary=role,
+        )
+        mission.graph.append(graph_node)
+        self.store.update_mission(mission)
         self.store.add_step(step)
         self.tracer.emit(mission.id, f"operator.{name.lower().replace(' ', '_')}.start", "started", {"role": role}, step.id)
         try:
             yield step
             step.status = StepStatus.COMPLETE
             step.completed_at = utc_now()
+            graph_node.status = StepStatus.COMPLETE
+            graph_node.completed_at = step.completed_at
+            graph_node.summary = step.output_summary or role
+            graph_node.metadata = step.metadata
+            self.store.update_mission(mission)
             self.store.add_step(step)
             self.tracer.emit(mission.id, f"operator.{name.lower().replace(' ', '_')}.complete", "complete", step.model_dump(), step.id)
         except Exception as exc:
             step.status = StepStatus.FAILED
             step.completed_at = utc_now()
             step.output_summary = str(exc)
+            graph_node.status = StepStatus.FAILED
+            graph_node.completed_at = step.completed_at
+            graph_node.summary = str(exc)
+            self.store.update_mission(mission)
             self.store.add_step(step)
             self.tracer.emit(mission.id, f"operator.{name.lower().replace(' ', '_')}.failed", "failed", {"error": str(exc)}, step.id)
             raise

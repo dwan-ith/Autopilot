@@ -3,7 +3,8 @@
   <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
-    <title>AUTOPILOT</title>
+    <title>AUTOPILOT - Autonomous Operator Runtime</title>
+    <meta name="description" content="Autonomous Operator Runtime for connected-system events and bounded actions." />
     <link rel="stylesheet" href="/static/styles.css" />
   </head>
   <body>
@@ -13,9 +14,14 @@
           <p class="eyebrow">Autonomous Operator Runtime</p>
           <h1>AUTOPILOT</h1>
         </div>
+        <div class="runtime-meta">
+          <span class="provider-badge" id="providerBadge">heuristic</span>
+          <span class="status-dot" id="statusDot"></span>
+          <span class="muted" id="statusLabel">idle</span>
+        </div>
         <div class="actions">
-          <button id="demoBtn" title="Fire an async multi-signal demo">Run Demo</button>
-          <button id="refreshBtn" title="Refresh missions">Refresh</button>
+          <button id="demoBtn" class="primary">Run Demo</button>
+          <button id="refreshBtn" class="secondary">Refresh</button>
         </div>
       </header>
 
@@ -23,18 +29,20 @@
         <aside class="panel">
           <div class="panel-head">
             <h2>Missions</h2>
-            <span id="missionCount">0</span>
+            <span class="count" id="missionCount">0</span>
           </div>
           <div id="missions" class="mission-list"></div>
         </aside>
 
         <section class="panel detail">
           <div class="panel-head">
-            <h2>Execution Graph</h2>
-            <span id="selectedStatus">idle</span>
+            <h2>Mission Execution</h2>
+            <span class="status-pill" id="selectedStatus">idle</span>
           </div>
           <div id="missionDetail" class="detail-body">
-            <p class="empty">Run the demo or send a webhook to watch AUTOPILOT create a mission graph.</p>
+            <div class="empty-state">
+              Run the demo or send a webhook to watch AUTOPILOT build a mission graph.
+            </div>
           </div>
         </section>
 
@@ -43,6 +51,11 @@
             <h2>Connectors</h2>
           </div>
           <div id="connectors" class="connector-list"></div>
+          <div class="panel-head split">
+            <h2>Trace</h2>
+            <span class="count" id="traceCount">0</span>
+          </div>
+          <div id="traceList" class="trace-list"></div>
         </aside>
       </section>
     </main>

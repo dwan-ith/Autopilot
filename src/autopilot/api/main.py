@@ -2,8 +2,6 @@ from __future__ import annotations
 
 import asyncio
 import json
-import hmac
-import hashlib
 from pathlib import Path
 from typing import Any
 
@@ -14,20 +12,19 @@ from fastapi.staticfiles import StaticFiles
 from autopilot.connectors import default_registry, default_maas_registry
 from autopilot.kernel import RuntimeKernel
 from autopilot.models import Signal, WebhookSignalRequest
+from autopilot.operators.llm import active_provider_name
 from autopilot.storage import ARTIFACT_DIR, ROOT, Store
-from autopilot.models import AgentType
-from autopilot.config import settings
 
 
 store = Store()
 registry = default_registry()
-maas = default_maas_registry(store)
-runtime = RuntimeKernel(store, registry, maas)
+runtime = RuntimeKernel(store, registry)
 
 app = FastAPI(
     title="AUTOPILOT",
     description="Autonomous Operator Runtime for connected systems.",
-    version="0.1.0",
+    version="0.2.0",
+    lifespan=lifespan,
 )
 
 dashboard_dir = ROOT / "dashboard"
@@ -38,8 +35,6 @@ if dashboard_dir.exists():
 @app.on_event("startup")
 async def startup() -> None:
     runtime.resume_active()
-    # start MAAS agent workers
-    runtime.start_agent_workers()
 
 
 @app.get("/", response_class=HTMLResponse)
@@ -52,7 +47,13 @@ async def index() -> HTMLResponse:
 
 @app.get("/health")
 async def health() -> dict[str, str]:
-    return {"status": "ok", "runtime": "autonomous-operator-runtime"}
+    return {"status": "ok", "runtime": "autonomous-operator-runtime", "provider": active_provider_name()}
+
+
+@app.get("/api/provider")
+async def provider() -> dict[str, str]:
+    """Expose the active LLM provider name to the dashboard."""
+    return {"provider": active_provider_name()}
 
 
 @app.get("/api/connectors")
@@ -72,24 +73,7 @@ async def agents() -> list[dict[str, Any]]:
 
 @app.post("/webhooks/{connector_name}")
 async def webhook(connector_name: str, request: Request) -> dict[str, Any]:
-    # read raw body for signature verification
-    body = await request.body()
-
-    # If GitHub webhook secret configured, verify signature header
-    if connector_name.lower() == "github" and settings.GITHUB_WEBHOOK_SECRET:
-        sig_header = request.headers.get("x-hub-signature-256")
-        if not sig_header:
-            raise HTTPException(status_code=401, detail="Missing signature header")
-        computed = hmac.new(settings.GITHUB_WEBHOOK_SECRET.encode(), body, hashlib.sha256).hexdigest()
-        expected = f"sha256={computed}"
-        if not hmac.compare_digest(expected, sig_header):
-            raise HTTPException(status_code=401, detail="Invalid signature")
-
-    try:
-        payload = json.loads(body.decode("utf-8"))
-    except Exception:
-        raise HTTPException(status_code=400, detail="Invalid JSON payload")
-
+    payload = await request.json()
     connector = registry.get(connector_name) if connector_name in {m.name for m in registry.manifests()} else registry.get("webhook")
     signal = await connector.normalize_event(payload)
     signal.source = connector_name

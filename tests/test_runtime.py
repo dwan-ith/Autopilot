@@ -1,7 +1,10 @@
 import asyncio
+import os
 import unittest
 from pathlib import Path
 from uuid import uuid4
+
+os.environ["AUTOPILOT_DISABLE_LLM"] = "1"
 
 from autopilot.connectors import default_registry
 from autopilot.kernel import RuntimeKernel
@@ -35,7 +38,7 @@ class RuntimeKernelTest(unittest.TestCase):
             )
             await runtime.ingest(second)
 
-            await runtime._tasks[mission.id]
+            await runtime.wait_for(mission.id)
             completed = store.get_mission(mission.id)
             self.assertIsNotNone(completed)
             self.assertEqual(completed.status, MissionStatus.COMPLETE)
@@ -43,10 +46,13 @@ class RuntimeKernelTest(unittest.TestCase):
             self.assertGreaterEqual(len(completed.hypotheses), 2)
             self.assertGreaterEqual(len(completed.evidence), 1)
             self.assertGreaterEqual(len(completed.actions), 1)
+            self.assertGreaterEqual(len(completed.policy_decisions), 1)
+            self.assertGreaterEqual(len(completed.graph), 1)
 
             steps = store.list_steps(mission.id)
             self.assertTrue(any(step["name"] == "Verification Gate" for step in steps))
             self.assertTrue(any(step["name"] == "Action Publisher" for step in steps))
+            self.assertEqual(len(completed.evidence), len({(ev.source, ev.title, ev.summary[:120]) for ev in completed.evidence}))
 
         asyncio.run(scenario())
 

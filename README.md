@@ -108,7 +108,6 @@ $env:PYTHONPATH="src"
 python -m unittest discover -s tests -v
 ```
 
-<<<<<<< HEAD
 ## Environment & Configuration
 
 Create a `.env` file at the project root (you can copy `.env.example`) and populate required values. Key environment variables:
@@ -137,10 +136,8 @@ Open the dashboard at `http://127.0.0.1:8080` and click **Run Demo**.
 
 CI / automated runs: add `GITHUB_TOKEN` and other secrets to your CI environment (GitHub Actions secrets, etc.).
 
-=======
 ## Omium
 
 Set `OMIUM_API_KEY` in `.env` to mark traces as Omium-ready. The current
 implementation records local trace events with causal step IDs; the integration
 point is isolated in `src/autopilot/tracing/omium.py`.
->>>>>>> 7e86d18fb019511de1ac9377bbddc4d936f91751

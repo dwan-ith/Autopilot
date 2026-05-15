@@ -265,6 +265,7 @@ class RuntimeKernel:
                 step.metadata = {"brief_preview": brief[:400]}
 
             # ── STEP 7: Action Publisher (Governor-gated) ─────────────────
+            validation: dict = {}  # safe default if publish_actions raises
             async with self.step(mission, "Action Publisher", "governor-gated side effects and notifications") as step:
                 actions, validation = await self.operators.publish_actions(mission, brief)
                 mission.actions.extend(actions)

@@ -1,19 +1,8 @@
-"""Multi-provider LLM client for AUTOPILOT — 6-key pool with role pinning.
-
-Key assignment (prevents parallel agents from hitting the same rate-limit bucket):
-  Slot 0 (OpenRouter-1): Investigator           — deep reasoning + search context
-  Slot 1 (OpenRouter-2): Planner                — hypothesis & branch planning
-  Slot 2 (OpenRouter-3): Verifier / Synthesizer — evidence scoring & brief writing
-  Slot 3 (Groq-1):       Correlator             — fast entity correlation
-  Slot 4 (Groq-2):       Executor / Validator   — fast action & post-check
-  Slot 5 (Groq-3):       Governor / Memory      — fast policy & recall
-
-Each slot is tried in order on 429 / timeout.  Returns None only when every
-slot is exhausted, triggering the heuristic fallback path.
-"""
+"""Multi-provider LLM client for AUTOPILOT with role-pinned slots."""
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import os
@@ -24,9 +13,6 @@ import httpx
 
 log = logging.getLogger("autopilot.llm")
 
-# ---------------------------------------------------------------------------
-# Slot definitions  (name, base_url, env_key, model)
-# ---------------------------------------------------------------------------
 
 _SLOT_DEFS: list[tuple[str, str, str, str, dict]] = [
     (
@@ -50,44 +36,24 @@ _SLOT_DEFS: list[tuple[str, str, str, str, dict]] = [
         "google/gemini-2.0-flash-001",
         {"HTTP-Referer": "https://github.com/dwan-ith/Autopilot", "X-Title": "AUTOPILOT"},
     ),
-    (
-        "groq-1",
-        "https://api.groq.com/openai/v1/chat/completions",
-        "GROQ_API_KEY",
-        "llama-3.3-70b-versatile",
-        {},
-    ),
-    (
-        "groq-2",
-        "https://api.groq.com/openai/v1/chat/completions",
-        "GROQ_API_KEY_2",
-        "llama-3.3-70b-versatile",
-        {},
-    ),
-    (
-        "groq-3",
-        "https://api.groq.com/openai/v1/chat/completions",
-        "GROQ_API_KEY_3",
-        "llama-3.3-70b-versatile",
-        {},
-    ),
+    ("groq-1", "https://api.groq.com/openai/v1/chat/completions", "GROQ_API_KEY", "llama-3.3-70b-versatile", {}),
+    ("groq-2", "https://api.groq.com/openai/v1/chat/completions", "GROQ_API_KEY_2", "llama-3.3-70b-versatile", {}),
+    ("groq-3", "https://api.groq.com/openai/v1/chat/completions", "GROQ_API_KEY_3", "llama-3.3-70b-versatile", {}),
 ]
 
-# Role → preferred slot index  (deterministic, no per-call overhead)
 _ROLE_SLOT: dict[str, int] = {
-    "investigator":  0,
-    "planner":       1,
-    "verifier":      2,
-    "synthesizer":   2,
-    "correlator":    3,
-    "executor":      4,
-    "validator":     4,
-    "governor":      5,
-    "memory":        5,
-    # legacy / fallback roles
-    "signal evaluator":   3,
-    "mission planner":    1,
-    "verification gate":  2,
+    "investigator": 0,
+    "planner": 1,
+    "verifier": 2,
+    "synthesizer": 2,
+    "correlator": 3,
+    "executor": 4,
+    "validator": 4,
+    "governor": 5,
+    "memory": 5,
+    "signal evaluator": 3,
+    "mission planner": 1,
+    "verification gate": 2,
     "synthesis operator": 2,
     "adaptive replanner": 1,
 }
@@ -96,7 +62,6 @@ _DISABLE_LLM = os.getenv("AUTOPILOT_DISABLE_LLM", "").lower() in {"1", "true", "
 
 
 def _build_slots() -> list[dict[str, Any]]:
-    """Read env vars and return usable slot configs."""
     slots = []
     for name, url, env_key, model, extra in _SLOT_DEFS:
         key = os.getenv(env_key, "").strip()
@@ -106,12 +71,10 @@ def _build_slots() -> list[dict[str, Any]]:
 
 
 def _slots_for_role(role: str) -> list[dict[str, Any]]:
-    """Return slots ordered by preference for the given role."""
     all_slots = _build_slots()
     if not all_slots:
         return []
     preferred = _ROLE_SLOT.get(role.lower().strip(), 0)
-    # Rotate so the preferred slot is first, cycle through the rest as fallback
     n = len(all_slots)
     order = [i % n for i in range(preferred, preferred + n)]
     seen, ordered = set(), []
@@ -128,13 +91,10 @@ def active_provider_name() -> str:
     slots = _build_slots()
     if not slots:
         return "heuristic"
-    names = [s["name"] for s in slots]
-    return f"pool({len(names)}): {', '.join(names[:3])}{'…' if len(names) > 3 else ''}"
+    names = [slot["name"] for slot in slots]
+    suffix = "..." if len(names) > 3 else ""
+    return f"pool({len(names)}): {', '.join(names[:3])}{suffix}"
 
-
-# ---------------------------------------------------------------------------
-# Core reasoning call  (tries all available slots before giving up)
-# ---------------------------------------------------------------------------
 
 async def reason(
     system: str,
@@ -146,17 +106,13 @@ async def reason(
     json_mode: bool = False,
     max_tokens: int = 1024,
 ) -> str | None:
-    """Send a chat-completion request using the best slot for the given role.
-
-    Tries each slot in preference order, skipping on 429 / timeout / error.
-    Returns the assistant message text, or ``None`` when all slots fail.
-    """
+    """Call the best available LLM slot for the role, then fall back across slots."""
     if _DISABLE_LLM:
         return None
 
     slots = _slots_for_role(role)
     if not slots:
-        log.warning("No LLM provider configured — heuristic fallback")
+        log.warning("No LLM provider configured; heuristic fallback")
         return None
 
     for slot in slots:
@@ -187,7 +143,7 @@ async def _call_slot(
         "model": model or slot["model"],
         "messages": [
             {"role": "system", "content": system},
-            {"role": "user",   "content": prompt},
+            {"role": "user", "content": prompt},
         ],
         "temperature": temperature,
         "max_tokens": max_tokens,
@@ -195,28 +151,44 @@ async def _call_slot(
     if json_mode:
         body["response_format"] = {"type": "json_object"}
 
-    try:
-        async with httpx.AsyncClient(timeout=90) as client:
-            resp = await client.post(slot["url"], headers=headers, json=body)
-            if resp.status_code == 429:
-                log.warning("Rate-limit on slot %s", slot["name"])
-                return None
-            resp.raise_for_status()
-            data = resp.json()
-            text = data["choices"][0]["message"]["content"]
-            log.debug("LLM %s: %.120s…", slot["name"], text)
-            return text
-    except httpx.HTTPStatusError as exc:
-        log.error("LLM %s HTTP %s: %s", slot["name"], exc.response.status_code, exc.response.text[:300])
-        return None
-    except Exception as exc:
-        log.error("LLM %s error: %s", slot["name"], exc)
-        return None
+    max_attempts = max(1, int(os.getenv("AUTOPILOT_LLM_RETRIES", "2")))
+    for attempt in range(max_attempts):
+        try:
+            async with httpx.AsyncClient(timeout=90) as client:
+                resp = await client.post(slot["url"], headers=headers, json=body)
+                if resp.status_code == 429:
+                    delay = _retry_delay(resp, attempt)
+                    log.warning("Rate-limit on slot %s; retrying in %.2fs", slot["name"], delay)
+                    await asyncio.sleep(delay)
+                    continue
+                resp.raise_for_status()
+                data = resp.json()
+                text = data["choices"][0]["message"]["content"]
+                log.debug("LLM %s: %.120s", slot["name"], text)
+                return text
+        except httpx.TimeoutException:
+            delay = min(2.0, 0.25 * (2**attempt))
+            log.warning("LLM %s timeout; retrying in %.2fs", slot["name"], delay)
+            await asyncio.sleep(delay)
+            continue
+        except httpx.HTTPStatusError as exc:
+            log.error("LLM %s HTTP %s: %s", slot["name"], exc.response.status_code, exc.response.text[:300])
+            return None
+        except Exception as exc:
+            log.error("LLM %s error: %s", slot["name"], exc)
+            return None
+    return None
 
 
-# ---------------------------------------------------------------------------
-# JSON extraction
-# ---------------------------------------------------------------------------
+def _retry_delay(resp: httpx.Response, attempt: int) -> float:
+    retry_after = resp.headers.get("retry-after", "").strip()
+    if retry_after:
+        try:
+            return min(10.0, max(0.1, float(retry_after)))
+        except ValueError:
+            pass
+    return min(5.0, 0.5 * (2**attempt))
+
 
 def parse_json(text: str | None) -> dict[str, Any] | list | None:
     """Best-effort JSON extraction from potentially messy LLM output."""
@@ -241,7 +213,7 @@ def parse_json(text: str | None) -> dict[str, Any] | list | None:
         end = text.rfind(close_ch)
         if start != -1 and end > start:
             try:
-                return json.loads(text[start: end + 1])
+                return json.loads(text[start : end + 1])
             except json.JSONDecodeError:
                 pass
 

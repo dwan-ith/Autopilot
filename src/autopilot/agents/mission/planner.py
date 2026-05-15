@@ -80,6 +80,7 @@ class PlannerAgent:
                     title=str(item.get("title", "Unnamed")),
                     rationale=str(item.get("rationale", "")),
                     confidence=float(item.get("initial_confidence", 0.35)),
+                    search_focus=str(item.get("search_focus", item.get("title", ""))),
                 )
                 for item in hypotheses_data
                 if isinstance(item, dict)
@@ -95,20 +96,29 @@ class PlannerAgent:
         candidates = [
             ("Rollout or configuration regression",
              "A recent deployment or flag change may have introduced a regression.",
+             "recent rollout deployment configuration regression job failure",
              ["rollout", "deploy", "config", "flag", "job", "export", "failure"]),
             ("Customer-impacting operational incident",
              "Active user impact requiring SLA-level response.",
+             "customer enterprise SLA escalation user impact support",
              ["customer", "enterprise", "urgent", "sla", "impact"]),
             ("Service dependency degradation",
              "An upstream dependency (database, queue, third-party) is degraded.",
+             "error spike latency dependency timeout service degradation",
              ["error", "latency", "spike", "dependency", "timeout", "503", "500"]),
             ("Data pipeline or async job failure",
              "A background job or data pipeline has failed silently.",
+             "data pipeline async job batch queue failure export",
              ["pipeline", "export", "job", "batch", "async", "queue"]),
         ]
-        hyps = [Hypothesis(title=t, rationale=r) for t, r, kw in candidates if any(k in text for k in kw)]
+        hyps = [
+            Hypothesis(title=t, rationale=r, search_focus=sf)
+            for t, r, sf, kw in candidates
+            if any(k in text for k in kw)
+        ]
         return hyps or [Hypothesis(
             title="Unclassified operational signal",
             rationale="No pattern matched. Broad investigation required.",
             confidence=0.25,
+            search_focus=mission.title,
         )]

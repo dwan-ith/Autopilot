@@ -210,7 +210,7 @@ Return: {"action": "answer", "result": {"new_hypotheses": [
         writers = [c for c in self.registry.by_capability(Capability.WRITE)
                    if "write_report" in c.manifest.safe_actions]
         for writer in writers:
-            decision = self.governor.decide(mission, writer, "write_report")
+            decision = await self.governor.decide_async(mission, writer, "write_report")
             mission.policy_decisions.append(decision)
             if decision.allowed:
                 actions.append(await writer.write(f"mission-{mission.id}", brief, {"mission_id": mission.id}))
@@ -276,7 +276,7 @@ Return: {"action": "answer", "result": {"new_hypotheses": [
                 "evidence_count": len(mission.evidence),
                 "recommended_action": self._recommended_action(mission),
             }
-            decision = self.governor.decide(mission, packet_writers[0], "write_action_packet")
+            decision = await self.governor.decide_async(mission, packet_writers[0], "write_action_packet")
             mission.policy_decisions.append(decision)
             if decision.allowed:
                 actions.append(await packet_writers[0].action("write_action_packet", packet))
@@ -284,7 +284,7 @@ Return: {"action": "answer", "result": {"new_hypotheses": [
         # 4. Notify ops
         notifiers = self.registry.by_capability(Capability.NOTIFY)
         if notifiers:
-            decision = self.governor.decide(mission, notifiers[0], "notify_ops")
+            decision = await self.governor.decide_async(mission, notifiers[0], "notify_ops")
             mission.policy_decisions.append(decision)
             if decision.allowed:
                 text = (

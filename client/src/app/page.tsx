@@ -41,6 +41,8 @@ import {
 } from "@/types";
 
 const API_BASE = process.env.NEXT_PUBLIC_API_URL || "";
+const API_KEY = process.env.NEXT_PUBLIC_AUTOPILOT_API_KEY || "";
+const READ_CONFIG = API_KEY ? { headers: { "x-autopilot-key": API_KEY } } : undefined;
 
 type View = "dashboard" | "connectors" | "approvals" | "traces" | "analytics";
 
@@ -821,9 +823,19 @@ function DetailStat({ icon: Icon, label, value }: { icon: ElementType; label: st
   );
 }
 
+type AgentTraceStep = {
+  step_number?: number;
+  thought?: string;
+  tool_call?: string;
+  tool_result?: {
+    success?: boolean;
+    output?: string;
+  };
+};
+
 function AgentCard({ run }: { run: AgentRun }) {
   const [showTrace, setShowTrace] = useState(false);
-  const steps = run.metadata.steps as any[];
+  const steps: AgentTraceStep[] = Array.isArray(run.metadata.steps) ? (run.metadata.steps as AgentTraceStep[]) : [];
 
   return (
     <div className="rounded-xl border border-border/40 bg-white/[0.01] p-4 space-y-4 shadow-sm hover:border-primary/20 transition-all">
@@ -1116,7 +1128,6 @@ function MissionDAG({ nodes }: { nodes: MissionGraphNode[] }) {
   }
 
   // Build a depth map using BFS from root nodes
-  const nodeMap = new Map(nodes.map(n => [n.id, n]));
   const childrenMap = new Map<string, string[]>();
   const roots: string[] = [];
 
@@ -1175,7 +1186,7 @@ function MissionDAG({ nodes }: { nodes: MissionGraphNode[] }) {
             layer.length === 3 ? "grid-cols-3" :
             "grid-cols-2 lg:grid-cols-4"
           )}>
-            {layer.map((node, i) => {
+            {layer.map((node) => {
               const colors = NODE_KIND_COLORS[node.kind] || DEFAULT_COLOR;
               const isComplete = node.status === "complete";
               const isRunning = node.status === "started";
@@ -1278,9 +1289,9 @@ function AnalyticsView() {
   const fetchAnalytics = useCallback(async () => {
     try {
       const [s, a, c] = await Promise.all([
-        axios.get(`${API_BASE}/api/analytics/missions`),
-        axios.get(`${API_BASE}/api/analytics/agents`),
-        axios.get(`${API_BASE}/api/analytics/connectors`),
+        axios.get(`${API_BASE}/api/analytics/missions`, READ_CONFIG),
+        axios.get(`${API_BASE}/api/analytics/agents`, READ_CONFIG),
+        axios.get(`${API_BASE}/api/analytics/connectors`, READ_CONFIG),
       ]);
       setStats(s.data);
       setAgents(a.data);
@@ -1293,9 +1304,16 @@ function AnalyticsView() {
   }, []);
 
   useEffect(() => {
-    void fetchAnalytics();
-    const interval = setInterval(fetchAnalytics, 5000);
-    return () => clearInterval(interval);
+    const refresh = window.setTimeout(() => {
+      void fetchAnalytics();
+    }, 0);
+    const interval = window.setInterval(() => {
+      void fetchAnalytics();
+    }, 5000);
+    return () => {
+      window.clearTimeout(refresh);
+      window.clearInterval(interval);
+    };
   }, [fetchAnalytics]);
 
   if (loading) {

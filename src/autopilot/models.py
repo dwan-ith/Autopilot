@@ -155,6 +155,7 @@ class Hypothesis(BaseModel):
     confidence: float = Field(default=0.35, ge=0.0, le=1.0)
     evidence_ids: list[str] = Field(default_factory=list)
     status: str = "open"
+    search_focus: str = ""  # What the Investigator should query — set by PlannerAgent
 
 
 class Evidence(BaseModel):

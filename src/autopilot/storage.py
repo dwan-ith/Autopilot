@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 import sqlite3
 import threading
 from contextlib import closing
@@ -340,6 +341,23 @@ class Store:
                 "insert into memory_items (key, value, created_at) values (?, ?, ?)",
                 (key, value, datetime.now(timezone.utc).isoformat()),
             )
+            self._prune_memory_locked(conn, key)
+
+    def _prune_memory_locked(self, conn: sqlite3.Connection, key: str) -> None:
+        keep = max(1, int(os.getenv("AUTOPILOT_MEMORY_KEEP_PER_KEY", "500")))
+        conn.execute(
+            """
+            delete from memory_items
+            where key=?
+              and id not in (
+                select id from memory_items
+                where key=?
+                order by id desc
+                limit ?
+              )
+            """,
+            (key, key, keep),
+        )
 
     def recall(self, key_like: str, limit: int = 5) -> list[str]:
         with self._lock, closing(self.connect()) as conn, conn:

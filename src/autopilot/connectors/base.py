@@ -12,6 +12,18 @@ class Connector(ABC):
     def has(self, capability: Capability) -> bool:
         return capability in self.manifest.capabilities
 
+    def readiness(self, action: str | None = None) -> dict[str, Any]:
+        configured = not self.manifest.auth_required
+        missing = [] if configured else ["credentials"]
+        return {
+            "configured": configured,
+            "action_ready": configured,
+            "missing": missing,
+            "mode": "ready" if configured else "missing_credentials",
+            "detail": "Connector is ready." if configured else "Connector credentials are not configured.",
+            "action": action,
+        }
+
     async def normalize_event(self, payload: dict[str, Any]) -> Signal:
         return Signal(
             source=self.manifest.name,
@@ -33,20 +45,6 @@ class Connector(ABC):
 
     async def action(self, name: str, payload: dict[str, Any]) -> ActionResult:
         raise NotImplementedError(f"{self.manifest.name} does not support action")
-
-    def readiness(self, action: str | None = None) -> dict[str, Any]:
-        """Default: webhook/passthrough connectors are always ready.
-        API-key and OAuth connectors override this to check credentials."""
-        return {
-            "configured": True,
-            "action_ready": True,
-            "missing": [],
-            "mode": self.manifest.auth_mode or "webhook",
-            "detail": f"{self.manifest.name} connector is active.",
-            "action": action,
-        }
-
-
 
 class ConnectorRegistry:
     def __init__(self) -> None:

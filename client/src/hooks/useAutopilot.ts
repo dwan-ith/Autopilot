@@ -5,6 +5,8 @@ import { Mission, Trace, Connector, ConnectorDirectoryItem, ActionApproval } fro
 const API_BASE = process.env.NEXT_PUBLIC_API_URL || "";
 const API_KEY = process.env.NEXT_PUBLIC_AUTOPILOT_API_KEY || "";
 const writeConfig = API_KEY ? { headers: { "x-autopilot-key": API_KEY } } : undefined;
+const readConfig = writeConfig;
+const eventStreamUrl = `${API_BASE}/api/events${API_KEY ? `?access_key=${encodeURIComponent(API_KEY)}` : ""}`;
 
 export type BackendConnection = {
   status: "checking" | "connected" | "degraded" | "offline";
@@ -49,7 +51,7 @@ export function useAutopilot() {
         axios.get(`${API_BASE}/api/connectors`),
         axios.get(`${API_BASE}/api/connector-directory`),
         axios.get(`${API_BASE}/api/provider`),
-        axios.get(`${API_BASE}/api/approvals`),
+        axios.get(`${API_BASE}/api/approvals`, readConfig),
       ]);
 
       setConnectors(connRes.data);
@@ -80,7 +82,7 @@ export function useAutopilot() {
       void fetchStaticData();
     }, 0);
 
-    const eventSource = new EventSource(`${API_BASE}/api/events`);
+    const eventSource = new EventSource(eventStreamUrl);
 
     eventSource.onopen = () => {
       setConnection((current) => ({

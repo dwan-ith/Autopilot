@@ -81,6 +81,14 @@ runtime = RuntimeKernel(store, registry)
 
 
 def require_write_access(request: Request) -> None:
+    _require_api_key(request, allow_query_key=False)
+
+
+def require_read_access(request: Request) -> None:
+    _require_api_key(request, allow_query_key=True)
+
+
+def _require_api_key(request: Request, allow_query_key: bool) -> None:
     expected = os.getenv("AUTOPILOT_API_KEY", "").strip()
     if not expected:
         return
@@ -88,8 +96,10 @@ def require_write_access(request: Request) -> None:
     authorization = request.headers.get("authorization", "").strip()
     if authorization.lower().startswith("bearer "):
         supplied = authorization[7:].strip()
+    if allow_query_key:
+        supplied = supplied or request.query_params.get("access_key", "").strip()
     if not supplied or not secrets.compare_digest(supplied, expected):
-        raise HTTPException(status_code=401, detail="AUTOPILOT_API_KEY is required for write operations")
+        raise HTTPException(status_code=401, detail="AUTOPILOT_API_KEY is required")
 
 
 # ---------------------------------------------------------------------------
@@ -122,7 +132,7 @@ def _verify_webhook_signature(body: bytes, request: Request) -> None:
     else:
         sig_hex = sig_header
 
-    expected_digest = hmac.new(secret.encode(), body, hashlib.sha256).hexdigest()
+    expected_digest = hmac.new(secret.encode(), msg=body, digestmod=hashlib.sha256).hexdigest()
     if not secrets.compare_digest(expected_digest, sig_hex.lower()):
         raise HTTPException(status_code=401, detail="Webhook signature mismatch")
 
@@ -273,19 +283,26 @@ async def disconnect_connector(connector_id: str, request: Request) -> dict[str,
 
 @app.post("/webhooks/{connector_name}")
 async def webhook(connector_name: str, request: Request) -> dict[str, Any]:
-    body = await request.body()
-    _verify_webhook_signature(body, request)
     require_write_access(request)
-    try:
-        payload = json.loads(body)
-    except Exception:
-        raise HTTPException(status_code=400, detail="Invalid JSON body")
+    payload = await _verified_json_payload(request)
     connector = registry.get(connector_name) if registry.has_name(connector_name) else registry.get("webhook")
     signal = await connector.normalize_event(payload)
     signal.source = connector_name
     store.trace(None, "webhook.received", "complete", {"connector": connector_name, "payload": payload})
     mission = await runtime.ingest(signal)
     return {"accepted": True, "mission_id": mission.id, "signal_id": signal.id, "status": mission.status}
+
+
+async def _verified_json_payload(request: Request) -> dict[str, Any]:
+    body = await request.body()
+    _verify_webhook_signature(body, request)
+    try:
+        payload = json.loads(body)
+    except Exception:
+        raise HTTPException(status_code=400, detail="Invalid JSON body")
+    if not isinstance(payload, dict):
+        raise HTTPException(status_code=400, detail="Webhook JSON body must be an object")
+    return payload
 
 @app.post("/api/signals")
 async def create_signal(signal_request: WebhookSignalRequest, request: Request) -> dict[str, Any]:
@@ -352,11 +369,13 @@ async def fire_demo(request: Request) -> dict[str, Any]:
     return {"started": True, "mission_id": mission.id, "run_id": run_id, "message": "Demo events are being emitted asynchronously."}
 
 @app.get("/api/missions")
-async def list_missions() -> list[dict[str, Any]]:
+async def list_missions(request: Request) -> list[dict[str, Any]]:
+    require_read_access(request)
     return store.list_missions()
 
 @app.get("/api/missions/{mission_id}")
-async def get_mission(mission_id: str) -> dict[str, Any]:
+async def get_mission(mission_id: str, request: Request) -> dict[str, Any]:
+    require_read_access(request)
     mission = store.get_mission(mission_id)
     if not mission:
         raise HTTPException(status_code=404, detail="Mission not found")
@@ -376,7 +395,8 @@ async def cancel_mission(mission_id: str, request: Request, payload: dict[str, A
 
 
 @app.get("/api/approvals")
-async def list_approvals(status: ApprovalStatus | None = ApprovalStatus.PENDING) -> list[dict[str, Any]]:
+async def list_approvals(request: Request, status: ApprovalStatus | None = ApprovalStatus.PENDING) -> list[dict[str, Any]]:
+    require_read_access(request)
     return store.list_action_approvals(status)
 
 
@@ -470,18 +490,21 @@ async def reject_action(approval_id: str, request: Request, payload: dict[str, A
     return approval.model_dump()
 
 @app.get("/api/traces")
-async def traces() -> list[dict[str, Any]]:
+async def traces(request: Request) -> list[dict[str, Any]]:
+    require_read_access(request)
     return store.list_traces()
 
 @app.get("/api/artifacts/{artifact_name}")
-async def artifact(artifact_name: str) -> FileResponse:
+async def artifact(artifact_name: str, request: Request) -> FileResponse:
+    require_read_access(request)
     path = ARTIFACT_DIR / artifact_name
     if not path.exists() or not path.resolve().is_relative_to(ARTIFACT_DIR.resolve()):
         raise HTTPException(status_code=404, detail="Artifact not found")
     return FileResponse(path)
 
 @app.get("/api/events")
-async def events() -> StreamingResponse:
+async def events(request: Request) -> StreamingResponse:
+    require_read_access(request)
     async def stream():
         last_payload = ""
         while True:
@@ -546,22 +569,25 @@ async def agent_security_audit_pr_open(request: Request, payload: dict[str, Any]
 # ── Analytics API ────────────────────────────────────────────────────────────
 
 @app.get("/api/analytics/missions")
-async def analytics_missions() -> dict:
+async def analytics_missions(request: Request) -> dict:
     """Aggregate mission statistics."""
+    require_read_access(request)
     analytics = _StateStore(store.path)
     return analytics.mission_stats()
 
 
 @app.get("/api/analytics/agents")
-async def analytics_agents() -> list[dict]:
+async def analytics_agents(request: Request) -> list[dict]:
     """Per-role agent performance metrics."""
+    require_read_access(request)
     analytics = _StateStore(store.path)
     return analytics.agent_performance()
 
 
 @app.get("/api/analytics/connectors")
-async def analytics_connectors() -> list[dict]:
+async def analytics_connectors(request: Request) -> list[dict]:
     """Per-connector action health."""
+    require_read_access(request)
     analytics = _StateStore(store.path)
     return analytics.connector_health()
 
@@ -571,7 +597,8 @@ async def analytics_connectors() -> list[dict]:
 @app.post("/webhooks/pagerduty")
 async def webhook_pagerduty(request: Request) -> dict[str, Any]:
     """Ingest PagerDuty incident webhooks."""
-    payload = await request.json()
+    require_write_access(request)
+    payload = await _verified_json_payload(request)
     connector = PagerDutyConnector()
     signal = await connector.normalize_event(payload)
     mission = await runtime.ingest(signal)
@@ -581,7 +608,8 @@ async def webhook_pagerduty(request: Request) -> dict[str, Any]:
 @app.post("/webhooks/jira")
 async def webhook_jira(request: Request) -> dict[str, Any]:
     """Ingest Jira issue webhooks (normalized via generic WebhookConnector)."""
-    payload = await request.json()
+    require_write_access(request)
+    payload = await _verified_json_payload(request)
     connector = WebhookConnector()
     signal = await connector.normalize_event(payload)
     signal.source = "jira"
@@ -593,7 +621,8 @@ async def webhook_jira(request: Request) -> dict[str, Any]:
 @app.post("/webhooks/weather")
 async def webhook_weather(request: Request) -> dict[str, Any]:
     """Ingest weather alert webhooks."""
-    payload = await request.json()
+    require_write_access(request)
+    payload = await _verified_json_payload(request)
     connector = WeatherConnector()
     signal = await connector.normalize_event(payload)
     mission = await runtime.ingest(signal)
@@ -645,16 +674,18 @@ async def oauth_callback_google(
 
 
 @app.delete("/oauth/revoke/{connector_id}")
-async def oauth_revoke(connector_id: str) -> dict[str, str]:
+async def oauth_revoke(connector_id: str, request: Request) -> dict[str, str]:
     """Disconnect an OAuth connector by deleting stored tokens."""
+    require_write_access(request)
     token_store = OAuthTokenStore(store.path)
     token_store.delete(connector_id)
     return {"status": "revoked", "connector_id": connector_id}
 
 
 @app.get("/oauth/status")
-async def oauth_status() -> dict[str, Any]:
+async def oauth_status(request: Request) -> dict[str, Any]:
     """Return OAuth readiness for all connectors that use OAuth."""
+    require_read_access(request)
     token_store = OAuthTokenStore(store.path)
     oauth_connectors = ["gmail", "google_drive"]
     result = {}

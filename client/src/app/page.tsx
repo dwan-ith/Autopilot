@@ -995,16 +995,16 @@ function ConnectorCard({
         <div className="flex flex-col items-end gap-2">
           <div className={cn(
             "flex items-center gap-1.5 rounded-full px-3 py-1 text-[10px] font-black uppercase tracking-tighter ring-1 ring-inset shadow-sm",
-            connected
+            connected || readiness?.configured
               ? "bg-emerald-500/10 text-emerald-500 ring-emerald-500/20"
-              : readiness?.configured
-                ? "bg-emerald-500/10 text-emerald-500 ring-emerald-500/20"
+              : readiness
+                ? "bg-amber-500/10 text-amber-500 ring-amber-500/20"
                 : connector.implemented
                   ? "bg-blue-500/10 text-blue-500 ring-blue-500/20"
                   : "bg-white/5 text-muted-foreground ring-white/10"
           )}>
-            <div className={cn("h-1.5 w-1.5 rounded-full", connected ? "bg-emerald-500 animate-pulse" : "bg-current opacity-40")} />
-            {connected || readiness?.configured ? "CONNECTED" : connector.implemented ? "ADAPTER" : "CATALOG"}
+            <div className={cn("h-1.5 w-1.5 rounded-full", connected ? "bg-emerald-500 animate-pulse" : readiness?.configured ? "bg-emerald-500" : readiness ? "bg-amber-500" : "bg-current opacity-40")} />
+            {connected || readiness?.configured ? "CONNECTED" : readiness ? "CONFIG REQUIRED" : connector.implemented ? "ADAPTER" : "CATALOG"}
           </div>
           
           {toolCount > 0 && (

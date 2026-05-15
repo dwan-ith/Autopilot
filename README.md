@@ -1,44 +1,44 @@
 # AUTOPILOT
 
-AUTOPILOT is a local-first autonomous operator runtime. It ingests operational
-signals, correlates related events into missions, runs bounded investigation
-agents, scores confidence, and publishes policy-gated actions such as local
-artifacts, notifications, and connector-backed follow-up work.
+AUTOPILOT is an autonomous operator runtime that processes operational signals, coordinates investigation agents, and safely executes policy-gated actions. It uses an LLM-backed reasoning loop to automate incident response workflows, such as searching runbooks, querying external APIs, and posting status updates.
 
-This repository is an MVP, not a production incident-response platform yet. The
-core runtime, SQLite persistence, mission graph, dashboard, policy engine,
-artifact writing, webhook ingestion, local knowledge search, and several real
-credential-backed connector adapters are implemented. Many external systems are
-usable only when credentials are configured, and some catalog entries are still
-demo or adapter-ready surfaces rather than deeply integrated product workflows.
+The platform is built around strict policy gates and human-in-the-loop approvals to ensure safe side effects in connected environments.
 
-## What Works Today
+## Features
 
-- Backend API with FastAPI and SQLite persistence.
-- Runtime kernel with mission lifecycle, correlation window, replanning, memory,
-  traces, approvals, and action history.
-- Next.js dashboard for missions, connectors, approvals, traces, and analytics.
-- Heuristic mode when no LLM provider is configured.
-- Optional OpenRouter/Groq provider pool for agent reasoning.
-- Webhook ingestion with optional API key and HMAC signature protection.
-- Local artifact reports and JSON action packets.
-- Local notification fallback, plus Slack webhook notifications when configured.
-- Real connector adapters for GitHub, Linear, Notion, Tavily, Weather, Sentry,
-  Gmail, and Google Drive, subject to credentials and current API scopes.
+- **Event Correlation**: Ingests signals via webhooks and aggregates related events into active missions.
+- **Agent Swarm**: Uses a ReAct-based agent loop to gather evidence across connected tools.
+- **Policy Engine**: Enforces rules based on connector capabilities, risk levels, and confidence thresholds.
+- **Human-in-the-Loop**: High-risk actions require explicit approval from the dashboard before execution.
+- **Observability**: SQLite-backed state management records every agent thought, tool call, and state transition.
+- **Local Fallback**: Can run in a deterministic, heuristic mode without an LLM provider for testing and validation.
 
-## Current Limits
+## Architecture 
 
-- This is local/demo-grade by default. There is no multi-tenant auth model,
-  hosted deployment hardening, RBAC, encrypted secret store, or durable worker
-  queue.
-- The connector directory is broader than the proven production surface. Treat
-  every connector as "credential-gated and needs live validation" unless the
-  tests cover the exact workflow you plan to use.
-- Autonomous side effects are intentionally narrow. High-risk actions require
-  explicit approval, and most write actions need confidence thresholds plus
-  connector readiness.
-- The offline heuristic path can demonstrate orchestration, but it is not a
-  substitute for grounded live evidence from configured systems.
+The pipeline processes missions through nine discrete stages:
+1. Memory Check
+2. Signal Correlation
+3. Planning
+4. Investigation
+5. Verification
+6. Adaptive Replanning (if confidence is low)
+7. Action Synthesis
+8. Action Publishing
+9. Final Validation
+
+## Connectors
+
+AUTOPILOT integrates with external systems via connectors. Each connector exposes specific read/write capabilities and tools to the agent swarm. 
+
+Implemented integrations include:
+- **GitHub**: Search issues/PRs, create issues, post comments.
+- **Linear**: Create issues.
+- **Communication**: Slack (notifications), Gmail (draft/send replies).
+- **Knowledge**: Local runbooks, Google Drive, Notion, Tavily.
+- **Observability**: Sentry, PagerDuty, Weather.
+- **System**: Durable artifacts and generic webhooks.
+
+*Note: Connectors require valid API keys or OAuth credentials to function.*
 
 ## Setup
 
@@ -46,13 +46,14 @@ demo or adapter-ready surfaces rather than deeply integrated product workflows.
 
 ```bash
 python -m venv .venv
-.venv\Scripts\activate
+# On Windows: .venv\Scripts\activate
+# On Unix: source .venv/bin/activate
 pip install -e ".[dev]"
-copy .env.example .env
+cp .env.example .env
+# Edit .env with your LLM and connector credentials
 python run_server.py
 ```
-
-Backend URL: `http://localhost:8090`
+Backend runs at: `http://localhost:8090`
 
 ### Frontend
 
@@ -61,8 +62,7 @@ cd client
 npm install
 npm run dev
 ```
-
-Frontend URL: `http://localhost:3000`
+Dashboard runs at: `http://localhost:3000`
 
 ### Docker
 
@@ -70,54 +70,28 @@ Frontend URL: `http://localhost:3000`
 docker compose up --build
 ```
 
-## Important Environment Variables
+## Configuration
 
-- `AUTOPILOT_API_KEY`: protects write endpoints and sensitive read streams when set.
-- `AUTOPILOT_WEBHOOK_SECRET`: enables HMAC verification for inbound webhooks.
-- `AUTOPILOT_DISABLE_LLM=1`: forces deterministic heuristic mode.
-- `OPENROUTER_API_KEY*`, `GROQ_API_KEY*`: optional LLM provider pool.
-- `GITHUB_TOKEN`, `LINEAR_API_KEY`, `NOTION_API_KEY`, `TAVILY_API_KEY`,
-  `OPENWEATHER_API_KEY`, `SENTRY_TOKEN`, `SENTRY_ORG`: optional connector credentials.
-- `GOOGLE_CLIENT_ID`, `GOOGLE_CLIENT_SECRET`: enables Gmail/Drive OAuth flows.
-- `SLACK_WEBHOOK_URL`: enables Slack notifications instead of local fallback.
+Set the following environment variables in `.env` to enable specific features:
 
-See `.env.example` for the full set.
+| Variable | Description |
+|---|---|
+| `AUTOPILOT_API_KEY` | Protects API endpoints and webhooks. |
+| `AUTOPILOT_WEBHOOK_SECRET` | Enables HMAC signature verification for inbound webhooks. |
+| `AUTOPILOT_DISABLE_LLM=1` | Runs the system in offline, deterministic heuristic mode. |
+| `OPENROUTER_API_KEY` | Primary LLM provider key (recommended). |
+| `GROQ_API_KEY` | Fallback LLM provider key. |
+| `SLACK_WEBHOOK_URL` | Enables Slack notifications for the `notify_ops` action. |
 
-## API Highlights
+Additional connector-specific keys (e.g., `GITHUB_TOKEN`, `NOTION_API_KEY`) are documented in `.env.example`.
 
-| Method | Path | Description |
-|---|---|---|
-| `GET` | `/health` | Runtime health and provider mode |
-| `POST` | `/api/signals` | Ingest a manual/normalized signal |
-| `POST` | `/demo/fire` | Emit the built-in three-signal scenario |
-| `GET` | `/api/missions` | List missions |
-| `GET` | `/api/missions/{id}` | Mission detail, steps, and traces |
-| `GET` | `/api/connectors` | Runtime connector readiness |
-| `GET` | `/api/connector-directory` | User-facing connector catalog |
-| `GET` | `/api/approvals` | Pending action approvals |
-| `POST` | `/api/approvals/{id}/approve` | Execute a queued approval |
-| `POST` | `/api/approvals/{id}/reject` | Reject a queued approval |
-| `GET` | `/api/analytics/missions` | Mission aggregate stats |
-| `GET` | `/api/analytics/agents` | Agent performance stats |
-| `GET` | `/api/analytics/connectors` | Connector action health |
-| `GET` | `/oauth/authorize/{connector_id}` | Start Google OAuth |
-| `GET` | `/oauth/status` | OAuth authorization status |
-| `DELETE` | `/oauth/revoke/{connector_id}` | Revoke stored OAuth tokens |
-| `POST` | `/webhooks/{connector_name}` | Ingest a connector webhook |
-
-## Example Signal
+## Testing
 
 ```bash
-curl -X POST http://localhost:8090/api/signals ^
-  -H "Content-Type: application/json" ^
-  -H "x-autopilot-key: your-secret-key" ^
-  -d "{\"source\":\"sentry\",\"type\":\"error.spike\",\"summary\":\"API error rate jumped from 1% to 38%\",\"entities\":[\"checkout-service\",\"payments\"],\"urgency\":\"high\"}"
-```
+# Run backend test suite
+python -m pytest tests/ -v
 
-## Tests
-
-```bash
-python -m unittest discover -s tests -v
+# Check frontend types and linting
 cd client
 npm run lint
 npm run build

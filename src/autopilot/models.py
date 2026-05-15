@@ -107,6 +107,8 @@ class ActionResult(BaseModel):
     summary: str
     artifact_path: str | None = None
     metadata: dict[str, Any] = Field(default_factory=dict)
+
+
 class AgentTask(BaseModel):
     id: str = Field(default_factory=lambda: new_id("task"))
     agent_type: AgentType
@@ -152,6 +154,8 @@ class MissionGraphNode(BaseModel):
     metadata: dict[str, Any] = Field(default_factory=dict)
     created_at: datetime = Field(default_factory=utc_now)
     completed_at: datetime | None = None
+
+
 class OperatorStep(BaseModel):
     id: str = Field(default_factory=lambda: new_id("step"))
     mission_id: str

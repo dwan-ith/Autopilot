@@ -1,1 +1,1 @@
-from autopilot.api.main import app
+from autopilot.api.main import app as app

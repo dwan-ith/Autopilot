@@ -10,7 +10,9 @@ class PolicyEngine:
     def __init__(self, min_external_notify_confidence: float = 0.55):
         self.min_external_notify_confidence = min_external_notify_confidence
 
-    def decide(self, mission: Mission, connector: Connector, action: str) -> PolicyDecision:
+    def decide(
+        self, mission: Mission, connector: Connector, action: str
+    ) -> PolicyDecision:
         if action not in connector.manifest.safe_actions:
             return PolicyDecision(
                 connector=connector.manifest.name,

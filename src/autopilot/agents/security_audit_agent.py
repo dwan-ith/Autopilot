@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import logging
-import os
 from datetime import datetime, timezone
 
 from autopilot.agents.base import BaseAgent
@@ -19,7 +18,14 @@ class SecurityAuditAgent(BaseAgent):
         # Stubbed scan: write findings to artifacts
         ARTIFACT_DIR.mkdir(parents=True, exist_ok=True)
         result = {"status": "stubbed", "findings": []}
-        return ActionRecord(agent_type=self.agent_type, platform="security", action_type="handle_task", payload=task.payload, result=result, created_at=datetime.now(timezone.utc))
+        return ActionRecord(
+            agent_type=self.agent_type,
+            platform="security",
+            action_type="handle_task",
+            payload=task.payload,
+            result=result,
+            created_at=datetime.now(timezone.utc),
+        )
 
     async def health_check(self) -> bool:
         return True

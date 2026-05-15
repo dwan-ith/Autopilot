@@ -1,1 +1,1 @@
-from autopilot.kernel.runtime import RuntimeKernel
+from autopilot.kernel.runtime import RuntimeKernel as RuntimeKernel

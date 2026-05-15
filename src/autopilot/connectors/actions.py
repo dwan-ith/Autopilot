@@ -21,8 +21,12 @@ class ArtifactConnector(Connector):
         reliability_score=0.99,
     )
 
-    async def write(self, name: str, content: str, metadata: dict | None = None) -> ActionResult:
-        safe_name = "".join(ch if ch.isalnum() or ch in ("-", "_") else "-" for ch in name).strip("-")
+    async def write(
+        self, name: str, content: str, metadata: dict | None = None
+    ) -> ActionResult:
+        safe_name = "".join(
+            ch if ch.isalnum() or ch in ("-", "_") else "-" for ch in name
+        ).strip("-")
         path = ARTIFACT_DIR / f"{safe_name}.md"
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(content, encoding="utf-8")
@@ -64,7 +68,10 @@ class NotificationConnector(Connector):
         if slack_url:
             try:
                 async with httpx.AsyncClient(timeout=10) as client:
-                    response = await client.post(slack_url, json={"text": payload.get("text", json.dumps(payload))})
+                    response = await client.post(
+                        slack_url,
+                        json={"text": payload.get("text", json.dumps(payload))},
+                    )
                     response.raise_for_status()
                 return ActionResult(
                     connector=self.manifest.name,
@@ -82,7 +89,9 @@ class NotificationConnector(Connector):
                     metadata={"mode": "slack"},
                 )
 
-        path = ARTIFACT_DIR / f"notification-{payload.get('mission_id', 'unknown')}.json"
+        path = (
+            ARTIFACT_DIR / f"notification-{payload.get('mission_id', 'unknown')}.json"
+        )
         path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
         return ActionResult(
             connector=self.manifest.name,

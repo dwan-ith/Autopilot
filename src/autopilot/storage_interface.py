@@ -23,9 +23,18 @@ class StoreInterface(Protocol):
 
     def list_steps(self, mission_id: str) -> list[dict[str, Any]]: ...
 
-    def trace(self, mission_id: str | None, name: str, status: str, payload: dict[str, Any], parent_step_id: str | None = None) -> None: ...
+    def trace(
+        self,
+        mission_id: str | None,
+        name: str,
+        status: str,
+        payload: dict[str, Any],
+        parent_step_id: str | None = None,
+    ) -> None: ...
 
-    def list_traces(self, mission_id: str | None = None, limit: int = 100) -> list[dict[str, Any]]: ...
+    def list_traces(
+        self, mission_id: str | None = None, limit: int = 100
+    ) -> list[dict[str, Any]]: ...
 
     def remember(self, key: str, value: str) -> None: ...
 

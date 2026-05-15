@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import json
 import logging
-from pathlib import Path
 from typing import Any
 
 from autopilot.models import Mission, Signal, AgentTask, ActionRecord, OperatorStep
@@ -21,7 +20,12 @@ class RedisPostgresStore(StoreInterface):
     writes.
     """
 
-    def __init__(self, redis_url: str | None = None, pg_dsn: str | None = None, fallback: Store | None = None):
+    def __init__(
+        self,
+        redis_url: str | None = None,
+        pg_dsn: str | None = None,
+        fallback: Store | None = None,
+    ):
         self.fallback = fallback or Store()
         self.redis = None
         if redis_url:
@@ -30,7 +34,9 @@ class RedisPostgresStore(StoreInterface):
 
                 self.redis = redis.from_url(redis_url)
             except Exception:
-                logger.exception("Failed to initialize redis client; continuing without redis")
+                logger.exception(
+                    "Failed to initialize redis client; continuing without redis"
+                )
                 self.redis = None
 
         # PG DSN support is planned; currently delegate to fallback (SQLite)
@@ -79,10 +85,19 @@ class RedisPostgresStore(StoreInterface):
     def list_steps(self, mission_id: str) -> list[dict[str, Any]]:
         return self.fallback.list_steps(mission_id)
 
-    def trace(self, mission_id: str | None, name: str, status: str, payload: dict[str, Any], parent_step_id: str | None = None) -> None:
+    def trace(
+        self,
+        mission_id: str | None,
+        name: str,
+        status: str,
+        payload: dict[str, Any],
+        parent_step_id: str | None = None,
+    ) -> None:
         self.fallback.trace(mission_id, name, status, payload, parent_step_id)
 
-    def list_traces(self, mission_id: str | None = None, limit: int = 100) -> list[dict[str, Any]]:
+    def list_traces(
+        self, mission_id: str | None = None, limit: int = 100
+    ) -> list[dict[str, Any]]:
         return self.fallback.list_traces(mission_id, limit)
 
     # --- memory ---

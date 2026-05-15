@@ -5,7 +5,16 @@ from contextlib import asynccontextmanager
 from typing import AsyncIterator
 
 from autopilot.connectors.base import ConnectorRegistry
-from autopilot.models import GraphNodeKind, Mission, MissionGraphNode, MissionStatus, OperatorStep, Signal, StepStatus, utc_now
+from autopilot.models import (
+    GraphNodeKind,
+    Mission,
+    MissionGraphNode,
+    MissionStatus,
+    OperatorStep,
+    Signal,
+    StepStatus,
+    utc_now,
+)
 from autopilot.operators import OperatorSuite
 from autopilot.storage import Store
 from autopilot.tracing import TraceSink
@@ -18,7 +27,13 @@ logger = logging.getLogger(__name__)
 
 
 class RuntimeKernel:
-    def __init__(self, store: Store, registry: ConnectorRegistry, maas_registry: MAASConnectorRegistry | None = None, correlation_window_seconds: float = 0.45):
+    def __init__(
+        self,
+        store: Store,
+        registry: ConnectorRegistry,
+        maas_registry: MAASConnectorRegistry | None = None,
+        correlation_window_seconds: float = 0.45,
+    ):
         self.store = store
         self.registry = registry
         self.operators = OperatorSuite(registry)
@@ -32,7 +47,9 @@ class RuntimeKernel:
         self._agent_queue: asyncio.Queue[AgentTask] = asyncio.Queue()
         self.orchestrator: OrchestratorAgent | None = None
         if maas_registry is not None:
-            self.orchestrator = OrchestratorAgent(maas_registry, store, self._agent_queue)
+            self.orchestrator = OrchestratorAgent(
+                maas_registry, store, self._agent_queue
+            )
         self._agent_worker_task: asyncio.Task | None = None
 
     async def ingest(self, signal: Signal) -> Mission:
@@ -52,9 +69,16 @@ class RuntimeKernel:
                 )
             )
             mission.status = MissionStatus.RUNNING
-            mission.summary = f"Correlated new {signal.type} signal into existing mission."
+            mission.summary = (
+                f"Correlated new {signal.type} signal into existing mission."
+            )
             self.store.update_mission(mission)
-            self.tracer.emit(mission.id, "signal.correlated", "complete", {"signal": signal.model_dump(), "mission": mission.id})
+            self.tracer.emit(
+                mission.id,
+                "signal.correlated",
+                "complete",
+                {"signal": signal.model_dump(), "mission": mission.id},
+            )
         else:
             mission = Mission(
                 title=self._title_for(signal),
@@ -75,7 +99,12 @@ class RuntimeKernel:
                 ],
             )
             self.store.create_mission(mission)
-            self.tracer.emit(mission.id, "mission.created", "complete", {"signal": signal.model_dump()})
+            self.tracer.emit(
+                mission.id,
+                "mission.created",
+                "complete",
+                {"signal": signal.model_dump()},
+            )
 
         self.schedule(mission.id)
         # Route MAAS agent tasks if orchestrator present
@@ -110,7 +139,12 @@ class RuntimeKernel:
                     task.status = "failed"
                     task.updated_at = utc_now()
                     self.store.save_agent_task(task)
-                    self.tracer.emit(task.mission_id, "agent.task.denied", "failed", {"task": task.model_dump()})
+                    self.tracer.emit(
+                        task.mission_id,
+                        "agent.task.denied",
+                        "failed",
+                        {"task": task.model_dump()},
+                    )
                     continue
 
                 agent = self.agent_registry.get(task.agent_type)
@@ -118,7 +152,12 @@ class RuntimeKernel:
                     task.status = "failed"
                     task.updated_at = utc_now()
                     self.store.save_agent_task(task)
-                    self.tracer.emit(task.mission_id, "agent.task.missing", "failed", {"task": task.model_dump()})
+                    self.tracer.emit(
+                        task.mission_id,
+                        "agent.task.missing",
+                        "failed",
+                        {"task": task.model_dump()},
+                    )
                     continue
 
                 # invoke agent
@@ -138,7 +177,12 @@ class RuntimeKernel:
                 task.status = "done"
                 task.updated_at = utc_now()
                 self.store.save_agent_task(task)
-                self.tracer.emit(task.mission_id, "agent.task.complete", "complete", {"task": task.model_dump(), "record": record.model_dump()})
+                self.tracer.emit(
+                    task.mission_id,
+                    "agent.task.complete",
+                    "complete",
+                    {"task": task.model_dump(), "record": record.model_dump()},
+                )
             except Exception as exc:
                 logger.exception("Error running agent task: %s", exc)
                 task.status = "failed"
@@ -177,25 +221,45 @@ class RuntimeKernel:
         try:
             mission.status = MissionStatus.RUNNING
             self.store.update_mission(mission)
-            self.tracer.emit(mission.id, "runtime.dispatch", "started", {"mission": mission.title})
+            self.tracer.emit(
+                mission.id, "runtime.dispatch", "started", {"mission": mission.title}
+            )
             await asyncio.sleep(self.correlation_window_seconds)
             mission = self.store.get_mission(mission_id) or mission
 
-            async with self.step(mission, "Signal Evaluator", "classify severity, entities, and operational importance") as step:
+            async with self.step(
+                mission,
+                "Signal Evaluator",
+                "classify severity, entities, and operational importance",
+            ) as step:
                 mission = await self.operators.evaluate_signal(mission)
                 step.output_summary = mission.summary
                 self.store.update_mission(mission)
 
-            async with self.step(mission, "Mission Planner", "spawn hypotheses and scoped investigation branches") as step:
+            async with self.step(
+                mission,
+                "Mission Planner",
+                "spawn hypotheses and scoped investigation branches",
+            ) as step:
                 mission = await self.operators.plan_mission(mission)
                 step.output_summary = f"Spawned {len(mission.hypotheses)} hypotheses."
-                step.metadata = {"hypotheses": [hyp.model_dump() for hyp in mission.hypotheses]}
+                step.metadata = {
+                    "hypotheses": [hyp.model_dump() for hyp in mission.hypotheses]
+                }
                 self.store.update_mission(mission)
 
-            async with self.step(mission, "Dynamic Subagents", "investigate hypotheses through capability-routed connectors") as step:
+            async with self.step(
+                mission,
+                "Dynamic Subagents",
+                "investigate hypotheses through capability-routed connectors",
+            ) as step:
                 mission = await self.operators.investigate(mission)
-                step.output_summary = f"Collected {len(mission.evidence)} evidence item(s)."
-                step.metadata = {"evidence": [ev.model_dump() for ev in mission.evidence]}
+                step.output_summary = (
+                    f"Collected {len(mission.evidence)} evidence item(s)."
+                )
+                step.metadata = {
+                    "evidence": [ev.model_dump() for ev in mission.evidence]
+                }
                 self.store.update_mission(mission)
 
             mission = self.store.get_mission(mission_id) or mission
@@ -203,7 +267,11 @@ class RuntimeKernel:
             self.store.update_mission(mission)
 
             if len(mission.signals) > 1 and mission.replans < 1:
-                async with self.step(mission, "Adaptive Replanner", "revise mission graph after correlated signals arrived mid-execution") as step:
+                async with self.step(
+                    mission,
+                    "Adaptive Replanner",
+                    "revise mission graph after correlated signals arrived mid-execution",
+                ) as step:
                     mission = await self.operators.replan(
                         mission,
                         "New correlated signals arrived while the mission was running; spawn follow-up investigation over the expanded incident context.",
@@ -211,61 +279,117 @@ class RuntimeKernel:
                     step.output_summary = f"Replan #{mission.replans}: expanded mission graph for {len(mission.signals)} correlated signals."
                     self.store.update_mission(mission)
 
-                async with self.step(mission, "Follow-up Subagent", "investigate the revised mission graph before final verification") as step:
+                async with self.step(
+                    mission,
+                    "Follow-up Subagent",
+                    "investigate the revised mission graph before final verification",
+                ) as step:
                     mission = await self.operators.investigate(mission)
                     step.output_summary = f"Follow-up collected additional evidence; total evidence={len(mission.evidence)}."
                     step.metadata = {"evidence_count": len(mission.evidence)}
                     self.store.update_mission(mission)
 
-            async with self.step(mission, "Verification Gate", "score confidence and decide whether to replan") as step:
+            async with self.step(
+                mission,
+                "Verification Gate",
+                "score confidence and decide whether to replan",
+            ) as step:
                 mission, needs_replan = await self.operators.verify(mission)
-                step.output_summary = f"Confidence={mission.confidence:.2f}; needs_replan={needs_replan}."
-                step.metadata = {"confidence": mission.confidence, "needs_replan": needs_replan}
+                step.output_summary = (
+                    f"Confidence={mission.confidence:.2f}; needs_replan={needs_replan}."
+                )
+                step.metadata = {
+                    "confidence": mission.confidence,
+                    "needs_replan": needs_replan,
+                }
                 self.store.update_mission(mission)
 
             if needs_replan:
-                async with self.step(mission, "Adaptive Replanner", "spawn follow-up branch because confidence is below threshold") as step:
+                async with self.step(
+                    mission,
+                    "Adaptive Replanner",
+                    "spawn follow-up branch because confidence is below threshold",
+                ) as step:
                     mission = await self.operators.replan(mission)
-                    step.output_summary = f"Replan #{mission.replans}: added follow-up evidence branch."
+                    step.output_summary = (
+                        f"Replan #{mission.replans}: added follow-up evidence branch."
+                    )
                     self.store.update_mission(mission)
 
-                async with self.step(mission, "Follow-up Subagent", "run targeted investigation from revised mission graph") as step:
+                async with self.step(
+                    mission,
+                    "Follow-up Subagent",
+                    "run targeted investigation from revised mission graph",
+                ) as step:
                     mission = await self.operators.investigate(mission)
                     mission, _ = await self.operators.verify(mission)
-                    step.output_summary = f"After follow-up, confidence={mission.confidence:.2f}."
-                    step.metadata = {"confidence": mission.confidence, "evidence_count": len(mission.evidence)}
+                    step.output_summary = (
+                        f"After follow-up, confidence={mission.confidence:.2f}."
+                    )
+                    step.metadata = {
+                        "confidence": mission.confidence,
+                        "evidence_count": len(mission.evidence),
+                    }
                     self.store.update_mission(mission)
 
-            async with self.step(mission, "Synthesis Operator", "produce verified operational action packet") as step:
+            async with self.step(
+                mission,
+                "Synthesis Operator",
+                "produce verified operational action packet",
+            ) as step:
                 brief = await self.operators.synthesize(mission)
                 step.output_summary = "Generated mission brief."
                 step.metadata = {"brief_preview": brief[:500]}
 
-            async with self.step(mission, "Action Publisher", "execute bounded writes and notifications") as step:
-                mission.actions.extend(await self.operators.publish_actions(mission, brief))
-                step.output_summary = f"Executed {len(mission.actions)} bounded action(s)."
+            async with self.step(
+                mission, "Action Publisher", "execute bounded writes and notifications"
+            ) as step:
+                mission.actions.extend(
+                    await self.operators.publish_actions(mission, brief)
+                )
+                step.output_summary = (
+                    f"Executed {len(mission.actions)} bounded action(s)."
+                )
                 step.metadata = {
                     "actions": [action.model_dump() for action in mission.actions],
-                    "policy_decisions": [decision.model_dump() for decision in mission.policy_decisions],
+                    "policy_decisions": [
+                        decision.model_dump() for decision in mission.policy_decisions
+                    ],
                 }
                 mission.status = MissionStatus.COMPLETE
                 mission.completed_at = utc_now()
                 self.store.update_mission(mission)
-                self.store.remember("mission_resolution", f"{mission.title}: confidence {mission.confidence:.2f}; actions {len(mission.actions)}")
+                self.store.remember(
+                    "mission_resolution",
+                    f"{mission.title}: confidence {mission.confidence:.2f}; actions {len(mission.actions)}",
+                )
 
-            self.tracer.emit(mission.id, "mission.complete", "complete", {"confidence": mission.confidence, "actions": len(mission.actions)})
+            self.tracer.emit(
+                mission.id,
+                "mission.complete",
+                "complete",
+                {"confidence": mission.confidence, "actions": len(mission.actions)},
+            )
         except Exception as exc:
             mission = self.store.get_mission(mission_id) or mission
             mission.status = MissionStatus.FAILED
             mission.summary = f"Runtime failed: {exc}"
             self.store.update_mission(mission)
-            self.tracer.emit(mission_id, "mission.failed", "failed", {"error": str(exc)})
+            self.tracer.emit(
+                mission_id, "mission.failed", "failed", {"error": str(exc)}
+            )
 
     @asynccontextmanager
-    async def step(self, mission: Mission, name: str, role: str) -> AsyncIterator[OperatorStep]:
-        step = OperatorStep(mission_id=mission.id, name=name, role=role, input_summary=mission.summary)
+    async def step(
+        self, mission: Mission, name: str, role: str
+    ) -> AsyncIterator[OperatorStep]:
+        step = OperatorStep(
+            mission_id=mission.id, name=name, role=role, input_summary=mission.summary
+        )
         graph_node = MissionGraphNode(
-            kind=GraphNodeKind.REPLAN if "Replanner" in name else GraphNodeKind.OPERATOR,
+            kind=GraphNodeKind.REPLAN
+            if "Replanner" in name
+            else GraphNodeKind.OPERATOR,
             title=name,
             ref_id=step.id,
             summary=role,
@@ -273,7 +397,13 @@ class RuntimeKernel:
         mission.graph.append(graph_node)
         self.store.update_mission(mission)
         self.store.add_step(step)
-        self.tracer.emit(mission.id, f"operator.{name.lower().replace(' ', '_')}.start", "started", {"role": role}, step.id)
+        self.tracer.emit(
+            mission.id,
+            f"operator.{name.lower().replace(' ', '_')}.start",
+            "started",
+            {"role": role},
+            step.id,
+        )
         try:
             yield step
             step.status = StepStatus.COMPLETE
@@ -284,7 +414,13 @@ class RuntimeKernel:
             graph_node.metadata = step.metadata
             self.store.update_mission(mission)
             self.store.add_step(step)
-            self.tracer.emit(mission.id, f"operator.{name.lower().replace(' ', '_')}.complete", "complete", step.model_dump(), step.id)
+            self.tracer.emit(
+                mission.id,
+                f"operator.{name.lower().replace(' ', '_')}.complete",
+                "complete",
+                step.model_dump(),
+                step.id,
+            )
         except Exception as exc:
             step.status = StepStatus.FAILED
             step.completed_at = utc_now()
@@ -294,7 +430,13 @@ class RuntimeKernel:
             graph_node.summary = str(exc)
             self.store.update_mission(mission)
             self.store.add_step(step)
-            self.tracer.emit(mission.id, f"operator.{name.lower().replace(' ', '_')}.failed", "failed", {"error": str(exc)}, step.id)
+            self.tracer.emit(
+                mission.id,
+                f"operator.{name.lower().replace(' ', '_')}.failed",
+                "failed",
+                {"error": str(exc)},
+                step.id,
+            )
             raise
 
     def _correlate(self, signal: Signal) -> Mission | None:
@@ -302,11 +444,15 @@ class RuntimeKernel:
         if not signal_entities:
             return None
         for mission in self.store.active_missions():
-            mission_entities = {entity.lower() for entity in self.operators.entities(mission)}
+            mission_entities = {
+                entity.lower() for entity in self.operators.entities(mission)
+            }
             if signal_entities & mission_entities:
                 return mission
         return None
 
     def _title_for(self, signal: Signal) -> str:
-        subject = signal.entities[0] if signal.entities else signal.type.replace("_", " ")
+        subject = (
+            signal.entities[0] if signal.entities else signal.type.replace("_", " ")
+        )
         return f"{subject}: {signal.summary[:80]}"

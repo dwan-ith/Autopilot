@@ -3,7 +3,13 @@ from __future__ import annotations
 from abc import ABC
 from typing import Any
 
-from autopilot.models import ActionResult, Capability, ConnectorManifest, Evidence, Signal
+from autopilot.models import (
+    ActionResult,
+    Capability,
+    ConnectorManifest,
+    Evidence,
+    Signal,
+)
 
 
 class Connector(ABC):
@@ -16,7 +22,11 @@ class Connector(ABC):
         return Signal(
             source=self.manifest.name,
             type=str(payload.get("type", "operational_signal")),
-            summary=str(payload.get("summary", payload.get("message", "External signal received"))),
+            summary=str(
+                payload.get(
+                    "summary", payload.get("message", "External signal received")
+                )
+            ),
             entities=list(payload.get("entities", [])),
             urgency=str(payload.get("urgency", "medium")),
             payload=payload,
@@ -28,7 +38,9 @@ class Connector(ABC):
     async def read(self, ref: str) -> dict[str, Any]:
         return {"ref": ref}
 
-    async def write(self, name: str, content: str, metadata: dict[str, Any] | None = None) -> ActionResult:
+    async def write(
+        self, name: str, content: str, metadata: dict[str, Any] | None = None
+    ) -> ActionResult:
         raise NotImplementedError(f"{self.manifest.name} does not support write")
 
     async def action(self, name: str, payload: dict[str, Any]) -> ActionResult:
@@ -52,4 +64,8 @@ class ConnectorRegistry:
         return [connector.manifest for connector in self._connectors.values()]
 
     def by_capability(self, capability: Capability) -> list[Connector]:
-        return [connector for connector in self._connectors.values() if connector.has(capability)]
+        return [
+            connector
+            for connector in self._connectors.values()
+            if connector.has(capability)
+        ]

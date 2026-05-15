@@ -21,7 +21,14 @@ class AnalyticsAgent(BaseAgent):
         # Aggregate simple KPIs from store (stub)
         traces = self.store.list_traces(task.mission_id, limit=10)
         result = {"status": "stubbed", "traces_sampled": len(traces)}
-        return ActionRecord(agent_type=self.agent_type, platform="analytics", action_type="handle_task", payload=task.payload, result=result, created_at=datetime.now(timezone.utc))
+        return ActionRecord(
+            agent_type=self.agent_type,
+            platform="analytics",
+            action_type="handle_task",
+            payload=task.payload,
+            result=result,
+            created_at=datetime.now(timezone.utc),
+        )
 
     async def health_check(self) -> bool:
         return True

@@ -10,7 +10,6 @@ from __future__ import annotations
 import asyncio
 import logging
 from datetime import datetime, timezone
-from typing import Any
 
 from autopilot.connectors.base import ConnectorRegistry
 from autopilot.models import ActionResult, Capability, Evidence, Hypothesis, Mission
@@ -136,7 +135,9 @@ class OperatorSuite:
             mission.severity = str(result.get("severity", mission.severity))
             impact = str(result.get("impact_summary", "")).strip()
             focus = str(result.get("investigation_focus", "")).strip()
-            mission.summary = " ".join(part for part in [impact, f"Focus: {focus}" if focus else ""] if part)
+            mission.summary = " ".join(
+                part for part in [impact, f"Focus: {focus}" if focus else ""] if part
+            )
             for signal in mission.signals:
                 for entity in result.get("key_entities", []) or []:
                     if entity not in signal.entities:
@@ -144,10 +145,22 @@ class OperatorSuite:
             return mission
 
         summaries = " ".join(signal.summary.lower() for signal in mission.signals)
-        urgency_max = max((2 if s.urgency.lower() in HIGH_URGENCY else 1 for s in mission.signals), default=1)
+        urgency_max = max(
+            (2 if s.urgency.lower() in HIGH_URGENCY else 1 for s in mission.signals),
+            default=1,
+        )
         impact_words = sum(
             word in summaries
-            for word in ["customer", "enterprise", "failure", "error", "spike", "urgent", "sla", "outage"]
+            for word in [
+                "customer",
+                "enterprise",
+                "failure",
+                "error",
+                "spike",
+                "urgent",
+                "sla",
+                "outage",
+            ]
         )
         mission.severity = "high" if urgency_max == 2 or impact_words >= 3 else "medium"
         mission.summary = (
@@ -184,13 +197,16 @@ class OperatorSuite:
         mission.hypotheses = self._heuristic_hypotheses(mission)
         return mission
 
-    async def investigate(self, mission: Mission, hypothesis_ids: set[str] | None = None) -> Mission:
+    async def investigate(
+        self, mission: Mission, hypothesis_ids: set[str] | None = None
+    ) -> Mission:
         searchers = self.registry.by_capability(Capability.SEARCH)
         if not searchers:
             return mission
 
         target_hypotheses = [
-            hypothesis for hypothesis in mission.hypotheses
+            hypothesis
+            for hypothesis in mission.hypotheses
             if hypothesis_ids is None or hypothesis.id in hypothesis_ids
         ]
 
@@ -199,16 +215,26 @@ class OperatorSuite:
             gathered: list[Evidence] = []
             for query in queries[:3]:
                 await asyncio.sleep(0.05)
-                batches = await asyncio.gather(*(connector.search(query) for connector in searchers))
+                batches = await asyncio.gather(
+                    *(connector.search(query) for connector in searchers)
+                )
                 for batch in batches:
                     gathered.extend(batch)
 
-            hypothesis.evidence_ids.extend(evidence.id for evidence in gathered if evidence.id not in hypothesis.evidence_ids)
+            hypothesis.evidence_ids.extend(
+                evidence.id
+                for evidence in gathered
+                if evidence.id not in hypothesis.evidence_ids
+            )
             if gathered:
-                hypothesis.confidence = min(0.92, max(e.confidence for e in gathered) * 0.82 + 0.14)
+                hypothesis.confidence = min(
+                    0.92, max(e.confidence for e in gathered) * 0.82 + 0.14
+                )
             return gathered
 
-        batches = await asyncio.gather(*(investigate_hypothesis(hyp) for hyp in target_hypotheses))
+        batches = await asyncio.gather(
+            *(investigate_hypothesis(hyp) for hyp in target_hypotheses)
+        )
         gathered = [item for batch in batches for item in batch]
         mission.evidence.extend(self._dedupe_evidence(mission.evidence, gathered))
         return mission
@@ -225,8 +251,12 @@ class OperatorSuite:
         result = parse_json(raw)
 
         if isinstance(result, dict):
-            mission.confidence = round(min(0.96, float(result.get("confidence", 0.5))), 2)
-            needs_replan = bool(result.get("needs_replan", False)) and mission.replans < 2
+            mission.confidence = round(
+                min(0.96, float(result.get("confidence", 0.5))), 2
+            )
+            needs_replan = (
+                bool(result.get("needs_replan", False)) and mission.replans < 2
+            )
             return mission, needs_replan
 
         strong_sources = {e.title for e in mission.evidence if e.confidence >= 0.65}
@@ -311,7 +341,11 @@ class OperatorSuite:
                     f"severity={mission.severity} | confidence={mission.confidence:.2f} | "
                     f"replans={mission.replans} | evidence={len(mission.evidence)}"
                 )
-                actions.append(await notifiers[0].action("notify_ops", {"mission_id": mission.id, "text": text}))
+                actions.append(
+                    await notifiers[0].action(
+                        "notify_ops", {"mission_id": mission.id, "text": text}
+                    )
+                )
             else:
                 actions.append(
                     ActionResult(
@@ -336,7 +370,12 @@ class OperatorSuite:
 
     def mission_text(self, mission: Mission) -> str:
         return " ".join(
-            [mission.title, mission.summary, *[s.summary for s in mission.signals], *self.entities(mission)]
+            [
+                mission.title,
+                mission.summary,
+                *[s.summary for s in mission.signals],
+                *self.entities(mission),
+            ]
         ).lower()
 
     async def _queries_for(self, mission: Mission, hypothesis: Hypothesis) -> list[str]:
@@ -352,9 +391,13 @@ class OperatorSuite:
             queries = [str(query) for query in result["queries"] if str(query).strip()]
             if queries:
                 return queries
-        return [f"{hypothesis.title} {' '.join(self.entities(mission))} {mission.signals[-1].summary}"]
+        return [
+            f"{hypothesis.title} {' '.join(self.entities(mission))} {mission.signals[-1].summary}"
+        ]
 
-    def _dedupe_evidence(self, existing: list[Evidence], new_items: list[Evidence]) -> list[Evidence]:
+    def _dedupe_evidence(
+        self, existing: list[Evidence], new_items: list[Evidence]
+    ) -> list[Evidence]:
         seen = {self._evidence_key(item) for item in existing}
         unique = []
         for item in new_items:
@@ -406,7 +449,9 @@ class OperatorSuite:
     def _heuristic_brief(self, mission: Mission) -> str:
         top = sorted(mission.hypotheses, key=lambda item: item.confidence, reverse=True)
         lead = top[0] if top else None
-        recommendation = "Create an owner-visible action packet and continue monitoring."
+        recommendation = (
+            "Create an owner-visible action packet and continue monitoring."
+        )
         if lead and "regression" in lead.title.lower() and mission.confidence >= 0.72:
             recommendation = "Inspect the recent rollout or configuration change and prepare rollback or flag-disable steps."
         elif mission.severity in {"critical", "high"}:
@@ -443,12 +488,16 @@ Replans: {mission.replans}
 """
 
     def _signal_lines(self, mission: Mission) -> str:
-        return "\n".join(f"- [{s.source}/{s.type}] {s.summary}" for s in mission.signals)
+        return "\n".join(
+            f"- [{s.source}/{s.type}] {s.summary}" for s in mission.signals
+        )
 
     def _hypothesis_lines(self, mission: Mission) -> str:
         return "\n".join(
             f"- {h.title} (confidence={h.confidence:.2f}): {h.rationale}"
-            for h in sorted(mission.hypotheses, key=lambda item: item.confidence, reverse=True)
+            for h in sorted(
+                mission.hypotheses, key=lambda item: item.confidence, reverse=True
+            )
         )
 
     def _evidence_lines(self, mission: Mission, limit: int) -> str:

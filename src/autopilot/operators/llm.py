@@ -74,6 +74,7 @@ def active_provider_name() -> str:
 # Core reasoning call
 # ---------------------------------------------------------------------------
 
+
 async def reason(
     system: str,
     prompt: str,
@@ -119,7 +120,12 @@ async def reason(
             log.debug("LLM response (%s): %.200s...", provider["name"], text)
             return text
     except httpx.HTTPStatusError as exc:
-        log.error("LLM %s HTTP %s: %s", provider["name"], exc.response.status_code, exc.response.text[:400])
+        log.error(
+            "LLM %s HTTP %s: %s",
+            provider["name"],
+            exc.response.status_code,
+            exc.response.text[:400],
+        )
         return None
     except Exception as exc:
         log.error("LLM call to %s failed: %s", provider["name"], exc)
@@ -129,6 +135,7 @@ async def reason(
 # ---------------------------------------------------------------------------
 # JSON extraction
 # ---------------------------------------------------------------------------
+
 
 def parse_json(text: str | None) -> dict[str, Any] | list | None:
     """Best-effort JSON extraction from potentially messy LLM output."""

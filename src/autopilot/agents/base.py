@@ -2,16 +2,14 @@ from __future__ import annotations
 
 from abc import ABC, abstractmethod
 
-from autopilot.models import AgentTask, ActionRecord
+from autopilot.models import ActionRecord, AgentTask, AgentType
 
 
 class BaseAgent(ABC):
-    agent_type: "AgentType"
+    agent_type: AgentType
 
     @abstractmethod
-    async def handle(self, task: AgentTask) -> ActionRecord:
-        ...
+    async def handle(self, task: AgentTask) -> ActionRecord: ...
 
     @abstractmethod
-    async def health_check(self) -> bool:
-        ...
+    async def health_check(self) -> bool: ...

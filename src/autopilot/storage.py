@@ -160,14 +160,22 @@ class Store:
             existing = self.get_mission(mission.id)
             if existing:
                 seen_signals = {signal.id for signal in mission.signals}
-                mission.signals.extend(signal for signal in existing.signals if signal.id not in seen_signals)
+                mission.signals.extend(
+                    signal
+                    for signal in existing.signals
+                    if signal.id not in seen_signals
+                )
 
                 seen_graph = {node.id for node in mission.graph}
-                mission.graph.extend(node for node in existing.graph if node.id not in seen_graph)
+                mission.graph.extend(
+                    node for node in existing.graph if node.id not in seen_graph
+                )
 
                 seen_policies = {decision.id for decision in mission.policy_decisions}
                 mission.policy_decisions.extend(
-                    decision for decision in existing.policy_decisions if decision.id not in seen_policies
+                    decision
+                    for decision in existing.policy_decisions
+                    if decision.id not in seen_policies
                 )
             mission.updated_at = utc_now()
             with closing(self.connect()) as conn, conn:
@@ -201,7 +209,9 @@ class Store:
 
     def get_mission(self, mission_id: str) -> Mission | None:
         with self._lock, closing(self.connect()) as conn, conn:
-            row = conn.execute("select payload from missions where id=?", (mission_id,)).fetchone()
+            row = conn.execute(
+                "select payload from missions where id=?", (mission_id,)
+            ).fetchone()
         if not row:
             return None
         return Mission.model_validate_json(row["payload"])
@@ -221,7 +231,11 @@ class Store:
         with self._lock, closing(self.connect()) as conn, conn:
             rows = conn.execute(
                 "select payload from missions where status in (?, ?, ?) order by datetime(updated_at) desc",
-                (MissionStatus.QUEUED.value, MissionStatus.RUNNING.value, MissionStatus.WAITING.value),
+                (
+                    MissionStatus.QUEUED.value,
+                    MissionStatus.RUNNING.value,
+                    MissionStatus.WAITING.value,
+                ),
             ).fetchall()
         return [Mission.model_validate_json(row["payload"]) for row in rows]
 
@@ -291,7 +305,9 @@ class Store:
                     record.platform,
                     record.action_type,
                     record.model_dump_json(),
-                    record.result and json.dumps(record.result, default=_json_default) or json.dumps({}),
+                    record.result
+                    and json.dumps(record.result, default=_json_default)
+                    or json.dumps({}),
                     record.trace_id,
                     record.created_at.isoformat(),
                 ),
@@ -313,7 +329,14 @@ class Store:
             ).fetchall()
         return [dict(row) for row in rows]
 
-    def trace(self, mission_id: str | None, name: str, status: str, payload: dict[str, Any], parent_step_id: str | None = None) -> None:
+    def trace(
+        self,
+        mission_id: str | None,
+        name: str,
+        status: str,
+        payload: dict[str, Any],
+        parent_step_id: str | None = None,
+    ) -> None:
         with self._lock, closing(self.connect()) as conn, conn:
             conn.execute(
                 """
@@ -330,7 +353,9 @@ class Store:
                 ),
             )
 
-    def list_traces(self, mission_id: str | None = None, limit: int = 100) -> list[dict[str, Any]]:
+    def list_traces(
+        self, mission_id: str | None = None, limit: int = 100
+    ) -> list[dict[str, Any]]:
         with self._lock, closing(self.connect()) as conn, conn:
             if mission_id:
                 rows = conn.execute(
@@ -338,7 +363,9 @@ class Store:
                     (mission_id, limit),
                 ).fetchall()
             else:
-                rows = conn.execute("select * from trace_events order by id desc limit ?", (limit,)).fetchall()
+                rows = conn.execute(
+                    "select * from trace_events order by id desc limit ?", (limit,)
+                ).fetchall()
         return [dict(row) for row in rows]
 
     def remember(self, key: str, value: str) -> None:

@@ -16,9 +16,21 @@ class DocsAgent(BaseAgent):
     async def handle(self, task: AgentTask) -> ActionRecord:
         notion = settings.NOTION_TOKEN
         confluence = settings.CONFLUENCE_TOKEN
-        logger.info("DocsAgent handling task %s (notion=%s, confluence=%s)", task.id, bool(notion), bool(confluence))
+        logger.info(
+            "DocsAgent handling task %s (notion=%s, confluence=%s)",
+            task.id,
+            bool(notion),
+            bool(confluence),
+        )
         result = {"status": "stubbed", "note": "would update Notion/Confluence pages"}
-        return ActionRecord(agent_type=self.agent_type, platform="docs", action_type="handle_task", payload=task.payload, result=result, created_at=datetime.now(timezone.utc))
+        return ActionRecord(
+            agent_type=self.agent_type,
+            platform="docs",
+            action_type="handle_task",
+            payload=task.payload,
+            result=result,
+            created_at=datetime.now(timezone.utc),
+        )
 
     async def health_check(self) -> bool:
         return bool(settings.NOTION_TOKEN or settings.CONFLUENCE_TOKEN)

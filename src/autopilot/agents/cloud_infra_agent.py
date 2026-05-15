@@ -16,9 +16,28 @@ class CloudInfraAgent(BaseAgent):
     async def handle(self, task: AgentTask) -> ActionRecord:
         aws = settings.AWS_PROFILE
         gcp = settings.GCP_PROJECT
-        logger.info("CloudInfraAgent handling task %s (aws=%s, gcp=%s)", task.id, bool(aws), bool(gcp))
-        result = {"status": "stubbed", "note": "would trigger deployment or query cost APIs"}
-        return ActionRecord(agent_type=self.agent_type, platform="cloud", action_type="handle_task", payload=task.payload, result=result, created_at=datetime.now(timezone.utc))
+        logger.info(
+            "CloudInfraAgent handling task %s (aws=%s, gcp=%s)",
+            task.id,
+            bool(aws),
+            bool(gcp),
+        )
+        result = {
+            "status": "stubbed",
+            "note": "would trigger deployment or query cost APIs",
+        }
+        return ActionRecord(
+            agent_type=self.agent_type,
+            platform="cloud",
+            action_type="handle_task",
+            payload=task.payload,
+            result=result,
+            created_at=datetime.now(timezone.utc),
+        )
 
     async def health_check(self) -> bool:
-        return bool(settings.AWS_PROFILE or settings.GCP_PROJECT or settings.AZURE_SUBSCRIPTION_ID)
+        return bool(
+            settings.AWS_PROFILE
+            or settings.GCP_PROJECT
+            or settings.AZURE_SUBSCRIPTION_ID
+        )

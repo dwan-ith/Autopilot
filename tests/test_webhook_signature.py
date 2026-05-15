@@ -18,8 +18,13 @@ class TestGitHubWebhookSignature(unittest.TestCase):
         settings.GITHUB_WEBHOOK_SECRET = "supersecret"
         body = {"action": "ping", "repository": {"full_name": "org/repo"}}
         body_bytes = json.dumps(body).encode("utf-8")
-        sig = hmac.new(settings.GITHUB_WEBHOOK_SECRET.encode(), body_bytes, hashlib.sha256).hexdigest()
-        headers = {"x-hub-signature-256": f"sha256={sig}", "content-type": "application/json"}
+        sig = hmac.new(
+            settings.GITHUB_WEBHOOK_SECRET.encode(), body_bytes, hashlib.sha256
+        ).hexdigest()
+        headers = {
+            "x-hub-signature-256": f"sha256={sig}",
+            "content-type": "application/json",
+        }
 
         with TestClient(app) as client:
             resp = client.post("/webhooks/github", data=body_bytes, headers=headers)
@@ -33,7 +38,10 @@ class TestGitHubWebhookSignature(unittest.TestCase):
         body = {"some": "payload"}
         body_bytes = json.dumps(body).encode("utf-8")
         # wrong signature
-        headers = {"x-hub-signature-256": "sha256=deadbeef", "content-type": "application/json"}
+        headers = {
+            "x-hub-signature-256": "sha256=deadbeef",
+            "content-type": "application/json",
+        }
 
         with TestClient(app) as client:
             resp = client.post("/webhooks/github", data=body_bytes, headers=headers)
@@ -45,7 +53,11 @@ class TestGitHubWebhookSignature(unittest.TestCase):
         body_bytes = json.dumps(body).encode("utf-8")
 
         with TestClient(app) as client:
-            resp = client.post("/webhooks/github", data=body_bytes, headers={"content-type": "application/json"})
+            resp = client.post(
+                "/webhooks/github",
+                data=body_bytes,
+                headers={"content-type": "application/json"},
+            )
         self.assertEqual(resp.status_code, 401)
 
 

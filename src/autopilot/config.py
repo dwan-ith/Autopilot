@@ -5,13 +5,23 @@ try:
 
     class Settings(BaseSettings):
         # GitHub
-        GITHUB_TOKEN: str | None = Field(None, description="Personal access token or app installation token")
-        GITHUB_API_URL: str = Field("https://api.github.com", description="GitHub API base URL")
-        GITHUB_WEBHOOK_SECRET: str | None = Field(None, description="GitHub webhook secret for signature verification")
+        GITHUB_TOKEN: str | None = Field(
+            None, description="Personal access token or app installation token"
+        )
+        GITHUB_API_URL: str = Field(
+            "https://api.github.com", description="GitHub API base URL"
+        )
+        GITHUB_WEBHOOK_SECRET: str | None = Field(
+            None, description="GitHub webhook secret for signature verification"
+        )
 
         # Redis/Postgres
-        REDIS_URL: str | None = Field(None, description="Redis URL, e.g. redis://localhost:6379/0")
-        POSTGRES_DSN: str | None = Field(None, description="Postgres DSN, e.g. postgresql://user:pass@host:5432/db")
+        REDIS_URL: str | None = Field(
+            None, description="Redis URL, e.g. redis://localhost:6379/0"
+        )
+        POSTGRES_DSN: str | None = Field(
+            None, description="Postgres DSN, e.g. postgresql://user:pass@host:5432/db"
+        )
 
         # Notification tokens
         SLACK_BOT_TOKEN: str | None = None

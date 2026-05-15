@@ -1,4 +1,3 @@
-
 from __future__ import annotations
 
 import httpx
@@ -77,7 +76,12 @@ class KnowledgeConnector(Connector):
             async with httpx.AsyncClient(timeout=12) as client:
                 response = await client.post(
                     "https://api.tavily.com/search",
-                    json={"api_key": api_key, "query": query, "max_results": 3, "search_depth": "basic"},
+                    json={
+                        "api_key": api_key,
+                        "query": query,
+                        "max_results": 3,
+                        "search_depth": "basic",
+                    },
                 )
                 response.raise_for_status()
         except Exception as exc:

@@ -52,7 +52,15 @@ class RuntimeKernelTest(unittest.TestCase):
             steps = store.list_steps(mission.id)
             self.assertTrue(any(step["name"] == "Verification Gate" for step in steps))
             self.assertTrue(any(step["name"] == "Action Publisher" for step in steps))
-            self.assertEqual(len(completed.evidence), len({(ev.source, ev.title, ev.summary[:120]) for ev in completed.evidence}))
+            self.assertEqual(
+                len(completed.evidence),
+                len(
+                    {
+                        (ev.source, ev.title, ev.summary[:120])
+                        for ev in completed.evidence
+                    }
+                ),
+            )
 
         asyncio.run(scenario())
 

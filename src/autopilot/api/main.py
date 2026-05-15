@@ -4,14 +4,14 @@ import asyncio
 import json
 import hmac
 import hashlib
-from pathlib import Path
 from typing import Any
 
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import FileResponse, HTMLResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 
-from autopilot.connectors import default_registry, default_maas_registry
+from autopilot.connectors import default_registry
+from autopilot.connectors import default_maas_registry
 from autopilot.kernel import RuntimeKernel
 from autopilot.models import Signal, WebhookSignalRequest
 from autopilot.operators.llm import active_provider_name
@@ -21,7 +21,8 @@ from autopilot.config import settings
 
 store = Store()
 registry = default_registry()
-runtime = RuntimeKernel(store, registry)
+maas = default_maas_registry(store)
+runtime = RuntimeKernel(store, registry, maas)
 
 app = FastAPI(
     title="AUTOPILOT",
@@ -49,7 +50,11 @@ async def index() -> HTMLResponse:
 
 @app.get("/health")
 async def health() -> dict[str, str]:
-    return {"status": "ok", "runtime": "autonomous-operator-runtime", "provider": active_provider_name()}
+    return {
+        "status": "ok",
+        "runtime": "autonomous-operator-runtime",
+        "provider": active_provider_name(),
+    }
 
 
 @app.get("/api/provider")
@@ -69,7 +74,12 @@ async def agents() -> list[dict[str, Any]]:
     agents = []
     if maas:
         for agent in maas.agents():
-            agents.append({"agent_type": agent.agent_type.value, "healthy": await agent.health_check()})
+            agents.append(
+                {
+                    "agent_type": agent.agent_type.value,
+                    "healthy": await agent.health_check(),
+                }
+            )
     return agents
 
 
@@ -83,7 +93,9 @@ async def webhook(connector_name: str, request: Request) -> dict[str, Any]:
         sig_header = request.headers.get("x-hub-signature-256")
         if not sig_header:
             raise HTTPException(status_code=401, detail="Missing signature header")
-        computed = hmac.new(settings.GITHUB_WEBHOOK_SECRET.encode(), body, hashlib.sha256).hexdigest()
+        computed = hmac.new(
+            settings.GITHUB_WEBHOOK_SECRET.encode(), body, hashlib.sha256
+        ).hexdigest()
         expected = f"sha256={computed}"
         if not hmac.compare_digest(expected, sig_header):
             raise HTTPException(status_code=401, detail="Invalid signature")
@@ -93,12 +105,26 @@ async def webhook(connector_name: str, request: Request) -> dict[str, Any]:
     except Exception:
         raise HTTPException(status_code=400, detail="Invalid JSON payload")
 
-    connector = registry.get(connector_name) if connector_name in {m.name for m in registry.manifests()} else registry.get("webhook")
+    connector = (
+        registry.get(connector_name)
+        if connector_name in {m.name for m in registry.manifests()}
+        else registry.get("webhook")
+    )
     signal = await connector.normalize_event(payload)
     signal.source = connector_name
-    store.trace(None, "webhook.received", "complete", {"connector": connector_name, "payload": payload})
+    store.trace(
+        None,
+        "webhook.received",
+        "complete",
+        {"connector": connector_name, "payload": payload},
+    )
     mission = await runtime.ingest(signal)
-    return {"accepted": True, "mission_id": mission.id, "signal_id": signal.id, "status": mission.status}
+    return {
+        "accepted": True,
+        "mission_id": mission.id,
+        "signal_id": signal.id,
+        "status": mission.status,
+    }
 
 
 @app.post("/api/signals")
@@ -159,7 +185,11 @@ async def fire_demo() -> dict[str, Any]:
         )
 
     asyncio.create_task(delayed_events())
-    return {"started": True, "mission_id": mission.id, "message": "Demo events are being emitted asynchronously."}
+    return {
+        "started": True,
+        "mission_id": mission.id,
+        "message": "Demo events are being emitted asynchronously.",
+    }
 
 
 @app.get("/api/missions")
@@ -197,7 +227,13 @@ async def events() -> StreamingResponse:
     async def stream():
         last_payload = ""
         while True:
-            payload = json.dumps({"missions": store.list_missions(), "traces": store.list_traces(limit=20)}, default=str)
+            payload = json.dumps(
+                {
+                    "missions": store.list_missions(),
+                    "traces": store.list_traces(limit=20),
+                },
+                default=str,
+            )
             if payload != last_payload:
                 yield f"data: {payload}\n\n"
                 last_payload = payload

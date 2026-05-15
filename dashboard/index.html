@@ -3,46 +3,81 @@
   <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
-    <title>AUTOPILOT</title>
+    <title>AUTOPILOT — Autonomous Operator Runtime</title>
+    <meta name="description" content="Multi-agent autonomous operator runtime that turns connected-system events into verified, policy-bounded actions." />
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800;900&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet" />
     <link rel="stylesheet" href="/static/styles.css" />
   </head>
   <body>
+    <div class="noise"></div>
     <main class="shell">
       <header class="topbar">
-        <div>
-          <p class="eyebrow">Autonomous Operator Runtime</p>
-          <h1>AUTOPILOT</h1>
+        <div class="brand">
+          <div class="logo-mark">
+            <div class="logo-pulse"></div>
+            <svg width="28" height="28" viewBox="0 0 24 24" fill="none" stroke="url(#g1)" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+              <defs><linearGradient id="g1" x1="0%" y1="0%" x2="100%" y2="100%"><stop offset="0%" stop-color="#3fb8af"/><stop offset="100%" stop-color="#7b68ee"/></linearGradient></defs>
+              <circle cx="12" cy="12" r="10"/><path d="M12 6v6l4 2"/>
+            </svg>
+          </div>
+          <div>
+            <p class="eyebrow">Autonomous Operator Runtime</p>
+            <h1>AUTOPILOT</h1>
+          </div>
+        </div>
+        <div class="header-meta">
+          <span class="provider-badge" id="providerBadge">—</span>
+          <span class="status-dot" id="statusDot"></span>
+          <span class="meta" id="statusLabel">idle</span>
         </div>
         <div class="actions">
-          <button id="demoBtn" title="Fire an async multi-signal demo">Run Demo</button>
-          <button id="refreshBtn" title="Refresh missions">Refresh</button>
+          <button id="demoBtn" class="btn-primary" title="Fire an async multi-signal demo">
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polygon points="5 3 19 12 5 21 5 3"/></svg>
+            Run Demo
+          </button>
+          <button id="refreshBtn" class="btn-ghost" title="Refresh missions">
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="23 4 23 10 17 10"/><polyline points="1 20 1 14 7 14"/><path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15"/></svg>
+          </button>
         </div>
       </header>
 
       <section class="grid">
-        <aside class="panel">
+        <!-- Left: Mission list -->
+        <aside class="panel glass" id="missionsPanel">
           <div class="panel-head">
             <h2>Missions</h2>
-            <span id="missionCount">0</span>
+            <span class="count-badge" id="missionCount">0</span>
           </div>
           <div id="missions" class="mission-list"></div>
         </aside>
 
-        <section class="panel detail">
+        <!-- Center: Execution graph -->
+        <section class="panel glass detail" id="detailPanel">
           <div class="panel-head">
             <h2>Execution Graph</h2>
-            <span id="selectedStatus">idle</span>
+            <span class="status-pill" id="selectedStatus">idle</span>
           </div>
           <div id="missionDetail" class="detail-body">
-            <p class="empty">Run the demo or send a webhook to watch AUTOPILOT create a mission graph.</p>
+            <div class="empty-state">
+              <svg width="48" height="48" viewBox="0 0 24 24" fill="none" stroke="var(--muted)" stroke-width="1.5" opacity="0.4"><circle cx="12" cy="12" r="10"/><path d="M12 6v6l4 2"/></svg>
+              <p>Run the demo or send a webhook to watch AUTOPILOT create a mission graph.</p>
+            </div>
           </div>
         </section>
 
-        <aside class="panel">
+        <!-- Right: Connectors + Trace -->
+        <aside class="panel glass" id="rightPanel">
           <div class="panel-head">
             <h2>Connectors</h2>
           </div>
           <div id="connectors" class="connector-list"></div>
+          <div class="panel-head" style="margin-top:4px">
+            <h2>Live Trace</h2>
+            <span class="count-badge" id="traceCount">0</span>
+          </div>
+          <div id="traceList" class="trace-list"></div>
         </aside>
       </section>
     </main>

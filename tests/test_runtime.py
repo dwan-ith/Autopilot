@@ -3,6 +3,13 @@ import unittest
 from pathlib import Path
 from uuid import uuid4
 
+# Load .env so LLM provider is detected during tests
+try:
+    from dotenv import load_dotenv
+    load_dotenv(Path(__file__).resolve().parents[1] / ".env")
+except ImportError:
+    pass
+
 from autopilot.connectors import default_registry
 from autopilot.kernel import RuntimeKernel
 from autopilot.models import MissionStatus, Signal

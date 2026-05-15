@@ -2,6 +2,9 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
+import logging.config
+from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Any
 
@@ -12,27 +15,37 @@ from fastapi.staticfiles import StaticFiles
 from autopilot.connectors import default_registry
 from autopilot.kernel import RuntimeKernel
 from autopilot.models import Signal, WebhookSignalRequest
+from autopilot.operators.llm import active_provider_name
 from autopilot.storage import ARTIFACT_DIR, ROOT, Store
+
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s  %(levelname)-8s  %(name)s  %(message)s",
+    datefmt="%H:%M:%S",
+)
 
 
 store = Store()
 registry = default_registry()
 runtime = RuntimeKernel(store, registry)
 
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    runtime.resume_active()
+    yield
+
+
 app = FastAPI(
     title="AUTOPILOT",
     description="Autonomous Operator Runtime for connected systems.",
-    version="0.1.0",
+    version="0.2.0",
+    lifespan=lifespan,
 )
 
 dashboard_dir = ROOT / "dashboard"
 if dashboard_dir.exists():
     app.mount("/static", StaticFiles(directory=dashboard_dir), name="static")
-
-
-@app.on_event("startup")
-async def startup() -> None:
-    runtime.resume_active()
 
 
 @app.get("/", response_class=HTMLResponse)
@@ -45,7 +58,13 @@ async def index() -> HTMLResponse:
 
 @app.get("/health")
 async def health() -> dict[str, str]:
-    return {"status": "ok", "runtime": "autonomous-operator-runtime"}
+    return {"status": "ok", "runtime": "autonomous-operator-runtime", "provider": active_provider_name()}
+
+
+@app.get("/api/provider")
+async def provider() -> dict[str, str]:
+    """Expose the active LLM provider name to the dashboard."""
+    return {"provider": active_provider_name()}
 
 
 @app.get("/api/connectors")

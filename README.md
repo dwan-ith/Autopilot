@@ -1,62 +1,114 @@
 # AUTOPILOT
 
-**Autonomous Operator Runtime** for connected systems.
+**Autonomous Operator Runtime** — turns events from connected systems into verified, policy-bounded actions.
 
-AUTOPILOT ingests events from connector surfaces, normalizes them into missions, dynamically coordinates scoped operators, gathers evidence, replans when confidence is low, executes bounded actions, and stores a durable trace.
+```
+connected surface → normalized signal → mission graph → dynamic operators → capability router → bounded action → trace + memory
+```
 
-## What Is Implemented
+## What it does
 
-- Connector registry with capability declarations
-- Generic webhook connector
-- Knowledge/search connector with local runbooks and optional Tavily live search
-- Artifact writer connector
-- Notification connector with Slack webhook or local fallback
-- SQLite-backed missions, steps, traces, and memory
-- Runtime kernel with correlation, dynamic subagents, verification, adaptive replanning, synthesis, and bounded actions
-- FastAPI API and SSE-powered dashboard
-- Omium-ready local tracing shim
+AUTOPILOT ingests operational signals from any webhook-compatible source, correlates related events into a unified **Mission**, then autonomously runs a pipeline of **LLM-powered operators** to investigate, reason, and act — without human steering.
+
+Each operator is a distinct AI agent with its own system prompt and cognitive role:
+
+| Operator | Role |
+|---|---|
+| Signal Evaluator | Triage severity and blast radius |
+| Mission Planner | Decompose incident into competing hypotheses |
+| Investigator | Generate search queries, gather evidence via connectors |
+| Verification Gate | Critically evaluate evidence, score confidence |
+| Adaptive Replanner | Fill evidence gaps when confidence is low |
+| Synthesis Operator | Write the actionable mission brief |
+| Action Publisher | Execute bounded writes and notifications |
 
 ## Quickstart
 
-```powershell
-cd C:\Users\aacer\Documents\Anvil\autopilot
+**Prerequisites:** Python 3.11+, an OpenRouter or Groq API key.
+
+```bash
+git clone https://github.com/dwan-ith/Autopilot
+cd Autopilot
 python -m venv venv
-.\venv\Scripts\Activate.ps1
+source venv/bin/activate        # Windows: venv\Scripts\Activate.ps1
 pip install -r requirements.txt
-$env:PYTHONPATH="src"
-uvicorn autopilot.api.main:app --reload --port 8080
+cp .env.example .env            # Fill in OPENROUTER_API_KEY or GROQ_API_KEY
+python run_server.py
 ```
 
-Open:
+Open **http://127.0.0.1:8080** and click **Run Demo**.
 
-```text
-http://127.0.0.1:8080
+AUTOPILOT will:
+1. Fire three async operational signals (support escalation, error spike, rollout status)
+2. Correlate them into a single mission via entity matching
+3. Run the full operator pipeline with real LLM reasoning
+4. Write an artifact report and send a notification
+5. Display the live execution graph in the dashboard
+
+## Webhook
+
+Send any operational event to AUTOPILOT:
+
+```bash
+curl -X POST http://127.0.0.1:8080/webhooks/custom \
+  -H "Content-Type: application/json" \
+  -d '{"type":"support_escalation","summary":"Enterprise customer reports failed exports after rollout.","entities":["export service","rollout"],"urgency":"high"}'
 ```
 
-Click **Run Demo**. AUTOPILOT will emit multiple asynchronous signals, correlate them into one mission, spawn operator steps, replan if confidence is low, publish artifacts, and show the execution graph.
+## LLM Providers
 
-## Webhook Example
+AUTOPILOT auto-detects the first available provider:
 
-```powershell
-Invoke-RestMethod -Method Post `
-  -Uri http://127.0.0.1:8080/webhooks/custom `
-  -ContentType "application/json" `
-  -Body '{"type":"support_escalation","summary":"Enterprise customer reports failed exports after today''s rollout.","entities":["export service","rollout"],"urgency":"high"}'
+| Provider | Key | Default model |
+|---|---|---|
+| **OpenRouter** (recommended) | `OPENROUTER_API_KEY` | `google/gemini-2.5-flash` |
+| **Groq** | `GROQ_API_KEY` | `llama-3.3-70b-versatile` |
+
+Without any key, all operators fall back to deterministic heuristics (useful for offline demo).
+
+## Connectors
+
+| Connector | Capabilities | Notes |
+|---|---|---|
+| `webhook` | read | Generic inbound event normalizer |
+| `knowledge` | search, read | Local runbooks + optional Tavily live search |
+| `artifact` | write, action | Writes durable markdown reports to `artifacts/` |
+| `notification` | notify, action | Slack webhook or local file fallback |
+
+## Architecture
+
 ```
-
-## Demo Thesis
-
-AUTOPILOT is not built for one app. It operates over any connector that implements the capability interface:
-
-```text
-connected surface -> normalized signal -> mission graph -> dynamic operators -> capability router -> bounded action -> trace + memory
+Connector Registry          declares capabilities per connector
+Normalized Object Model     Signal → Mission → Evidence → ActionResult
+Runtime Kernel              crash-safe async task loop with SQLite persistence
+Operator Suite              6 LLM-powered agents + action publisher
+Capability Router           matches mission needs to connector methods
+Policy Layer                only safe_actions are permitted per connector
+Trace Sink                  every step emitted to SQLite + Omium-ready hook
 ```
-
-The included demo uses generic webhook, knowledge, artifact, and notification connectors to prove the runtime without binding the product to a single domain.
 
 ## Tests
 
-```powershell
-$env:PYTHONPATH="src"
+```bash
+$env:PYTHONPATH = "src"   # PowerShell
+# or
+export PYTHONPATH=src     # bash
+
 python -m unittest discover -s tests -v
 ```
+
+## Dependencies
+
+```
+fastapi, uvicorn, pydantic, python-dotenv, httpx, python-multipart
+```
+
+No LLM SDK required — calls are made directly to the provider's OpenAI-compatible REST API via `httpx`.
+
+## Omium Tracing
+
+Set `OMIUM_API_KEY` in `.env`. Every operator step, webhook receipt, and action is emitted to the local `TraceSink` which is wired to emit to Omium when the key is present.
+
+## License
+
+MIT

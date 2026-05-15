@@ -1,13 +1,20 @@
+"""AUTOPILOT server entrypoint with reloading and PYTHONPATH setup."""
+
 from __future__ import annotations
 
 import sys
 from pathlib import Path
 
-import uvicorn
-
-
 ROOT = Path(__file__).resolve().parent
 sys.path.insert(0, str(ROOT / "src"))
 
 if __name__ == "__main__":
-    uvicorn.run("autopilot.api.main:app", host="127.0.0.1", port=8090)
+    import uvicorn
+    uvicorn.run(
+        "autopilot.api.main:app",
+        host="127.0.0.1",
+        port=8080,
+        reload=True,
+        reload_dirs=[str(ROOT / "src")],
+        log_level="info",
+    )

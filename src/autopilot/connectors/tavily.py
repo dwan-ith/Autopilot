@@ -95,3 +95,14 @@ class TavilyConnector(Connector):
                 return results
         except Exception as e:
             return [Evidence(source="tavily", title="Tavily search failed", summary=str(e), confidence=0.0)]
+
+    def as_tools(self):
+        from autopilot.agents.base import Tool
+        return [
+            Tool(
+                name="tavily_web_search",
+                description="Search the live web for current information, documentation, and incident context.",
+                parameters={"query": "Web search query"},
+                fn=self.search,
+            )
+        ]

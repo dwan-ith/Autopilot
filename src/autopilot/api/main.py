@@ -26,10 +26,20 @@ from autopilot.connectors.pagerduty import PagerDutyConnector
 from autopilot.connectors.tavily import TavilyConnector
 from autopilot.connectors.weather import WeatherConnector
 from autopilot.connectors.webhook import SentryConnector, WebhookConnector
+from autopilot.connectors.oauth import (
+    OAuthTokenStore,
+    SCOPES_COMBINED,
+    SCOPES_DRIVE,
+    SCOPES_GMAIL,
+    build_google_auth_url,
+    exchange_code,
+    google_configured,
+)
 from autopilot.kernel import RuntimeKernel
 from autopilot.models import ActionResult, ApprovalStatus, AuthMode, GraphNodeKind, MissionGraphNode, Signal, StepStatus, WebhookSignalRequest, new_id, utc_now
 from autopilot.operators.llm import active_provider_name
 from autopilot.storage import ARTIFACT_DIR, ROOT, Store
+from fastapi.responses import RedirectResponse
 
 CONNECTOR_CLASSES = {
     "github": GitHubConnector,
@@ -508,17 +518,6 @@ async def webhook_weather(request: Request) -> dict[str, Any]:
 
 
 # ── OAuth2 Flow ───────────────────────────────────────────────────────────────
-
-from autopilot.connectors.oauth import (
-    OAuthTokenStore,
-    build_google_auth_url,
-    exchange_code,
-    google_configured,
-    SCOPES_GMAIL,
-    SCOPES_DRIVE,
-    SCOPES_COMBINED,
-)
-from fastapi.responses import RedirectResponse
 
 
 @app.get("/oauth/authorize/{connector_id}")

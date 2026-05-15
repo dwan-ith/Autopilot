@@ -123,3 +123,15 @@ class WeatherConnector(Connector):
             urgency="high" if alert.get("severity") in {"Extreme", "Severe"} else "medium",
             payload=payload,
         )
+
+    def as_tools(self):
+        from autopilot.agents.base import Tool
+        return [
+            Tool(
+                name="weather_search",
+                description="Get current weather for a location. Use when correlating outages with storms or environmental events.",
+                parameters={"query": "City name or 'lat,lon' coordinates"},
+                fn=self.search,
+            )
+        ]
+

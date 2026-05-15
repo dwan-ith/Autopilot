@@ -16,6 +16,12 @@ class SecurityAuditConnector(Connector):
         reliability_score=0.84,
     )
 
+    def readiness(self, action: str | None = None) -> dict:
+        return {
+            "configured": True, "action_ready": True, "missing": [],
+            "mode": "webhook", "detail": "Security audit webhook receiver is active.", "action": action,
+        }
+
     async def normalize_event(self, payload: dict[str, Any]) -> Signal:
         action = str(payload.get("action", "opened"))
         pull_request = payload.get("pull_request", {}) if isinstance(payload.get("pull_request"), dict) else {}

@@ -164,3 +164,15 @@ class NotionConnector(Connector):
                 )
         except Exception as e:
             return ActionResult(connector="notion", action="create_page", status="failed", summary=str(e))
+
+    def as_tools(self):
+        from autopilot.agents.base import Tool
+        return [
+            Tool(
+                name="notion_search",
+                description="Search Notion pages and databases for runbooks, incident records, or knowledge.",
+                parameters={"query": "Search query"},
+                fn=self.search,
+            )
+        ]
+

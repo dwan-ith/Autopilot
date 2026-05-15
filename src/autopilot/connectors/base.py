@@ -34,6 +34,19 @@ class Connector(ABC):
     async def action(self, name: str, payload: dict[str, Any]) -> ActionResult:
         raise NotImplementedError(f"{self.manifest.name} does not support action")
 
+    def readiness(self, action: str | None = None) -> dict[str, Any]:
+        """Default: webhook/passthrough connectors are always ready.
+        API-key and OAuth connectors override this to check credentials."""
+        return {
+            "configured": True,
+            "action_ready": True,
+            "missing": [],
+            "mode": self.manifest.auth_mode or "webhook",
+            "detail": f"{self.manifest.name} connector is active.",
+            "action": action,
+        }
+
+
 
 class ConnectorRegistry:
     def __init__(self) -> None:

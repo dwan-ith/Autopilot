@@ -105,17 +105,19 @@ class GitHubConnector(Connector):
         return os.getenv("GITHUB_REPO", "").strip() or None
 
     def readiness(self, action: str | None = None) -> dict[str, Any]:
+        token = bool(_token())
+        write_action = action in {"create_issue", "post_comment"}
         missing = []
-        if not _token():
-            missing.append("GITHUB_TOKEN")
-        if action in {"create_issue", "post_comment"} and not self._default_repo():
-            missing.append("GITHUB_REPO")
+        if write_action and not token:
+            missing.append("GITHUB_TOKEN (required for write actions)")
+        if write_action and not self._default_repo():
+            missing.append("GITHUB_REPO (required for write actions)")
         return {
-            "configured": not missing,
-            "action_ready": not missing,
-            "missing": missing,
-            "mode": "api_key" if not missing else "missing_credentials",
-            "detail": "GitHub API access is configured." if not missing else "GitHub token/repository configuration is incomplete.",
+            "configured": True,   # anonymous public search always works (60 req/hr)
+            "action_ready": True,
+            "missing": missing if missing else ([] if token else ["GITHUB_TOKEN (optional — enables private repos + write actions)"]),
+            "mode": "authenticated" if token else "anonymous_public",
+            "detail": "GitHub API ready (authenticated)." if token else "Anonymous public GitHub search active. Set GITHUB_TOKEN for private repos and write actions.",
             "action": action,
         }
 
@@ -198,17 +200,9 @@ class GitHubConnector(Connector):
         )
 
     async def search(self, query: str, repo: str | None = None) -> list[Evidence]:
-        """Search GitHub issues and PRs using the GitHub Search API."""
-        token = _token()
-        if not token:
-            return [Evidence(
-                source="github",
-                title="GitHub not configured",
-                summary="Set GITHUB_TOKEN to enable GitHub issue search.",
-                confidence=0.0,
-                metadata={"kind": "config_error"},
-            )]
-
+        """Search GitHub issues and PRs using the GitHub Search API.
+        Works anonymously for public repos (60 req/hr). Token enables private repos.
+        """
         target = repo or self._default_repo()
         search_query = f"{query} in:title,body"
         if target:
@@ -256,11 +250,8 @@ class GitHubConnector(Connector):
           - "owner/repo/issues/123"
           - "owner/repo/pulls/123"
           - "owner/repo/contents/path/to/file"
+        Works anonymously for public repos.
         """
-        token = _token()
-        if not token:
-            return {"error": "GITHUB_TOKEN not set"}
-
         parts = ref.split("/")
         if len(parts) < 4:
             return {"error": f"Invalid GitHub ref format: {ref}. Expected owner/repo/type/id"}

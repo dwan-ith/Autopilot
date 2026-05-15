@@ -81,7 +81,7 @@ CATALOG: list[ConnectorCatalogItem] = [
         implemented=True,
     ),
     ConnectorCatalogItem(
-        id="notification",
+        id="slack",
         name="Slack",
         category="Communication",
         description="Send bounded operational notifications to a Slack webhook when policy allows.",
@@ -138,7 +138,7 @@ CATALOG: list[ConnectorCatalogItem] = [
         implemented=True,
     ),
     ConnectorCatalogItem(
-        id="knowledge",
+        id="web_search",
         name="Web Search",
         category="Research",
         description="Search public web context and external validation via local runbooks and optional Tavily.",
@@ -208,7 +208,7 @@ CATALOG: list[ConnectorCatalogItem] = [
         implemented=True,
     ),
     ConnectorCatalogItem(
-        id="artifact",
+        id="local_artifacts",
         name="Artifacts",
         category="System",
         description="Write durable Markdown reports and JSON action packets to the local artifact store.",

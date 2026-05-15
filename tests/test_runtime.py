@@ -21,9 +21,13 @@ from autopilot.connectors import actions as action_connectors
 from autopilot.connectors.actions import ArtifactConnector, NotificationConnector
 from autopilot.connectors.base import Connector
 from autopilot.connectors import default_registry
+from autopilot.connectors.gmail import GmailConnector
+from autopilot.connectors.google_drive import GoogleDriveConnector
 from autopilot.connectors.knowledge import KnowledgeConnector
+from autopilot.connectors.notion import NotionConnector
 from autopilot.connectors.pagerduty import PagerDutyConnector
 from autopilot.connectors.service import ConnectorDirectory
+from autopilot.connectors.weather import WeatherConnector
 from autopilot.connectors.webhook import SentryConnector, WebhookConnector
 from autopilot.kernel import RuntimeKernel
 from autopilot.models import (
@@ -102,8 +106,14 @@ class RuntimeKernelTest(unittest.TestCase):
             self.assertEqual(len(completed.evidence), len({(ev.source, ev.title, ev.summary[:120]) for ev in completed.evidence}))
             self.assertFalse(any(ev.metadata.get("kind") == "config_error" for ev in completed.evidence))
             self.assertTrue(any(action.action == "write_action_packet" for action in completed.actions))
-            self.assertFalse(completed.approvals)
-            self.assertTrue(any(action.status == "skipped" and action.action == "create_issue" for action in completed.actions))
+            # With anonymous GitHub search active, a create_issue may enter the approval queue
+            # if confidence < 0.72 threshold. That is correct policy behaviour — all such
+            # approvals must be PENDING (policy-blocked), not requiring human input.
+            for approval in completed.approvals:
+                self.assertEqual(approval.status.value, "pending")
+                self.assertIn("confidence", approval.reason.lower())
+            self.assertTrue(any(action.status == "skipped" and action.action == "create_issue" for action in completed.actions)
+                            or any(a.action == "create_issue" for a in completed.approvals))
         asyncio.run(scenario())
 
     def test_pending_approval_can_be_executed_through_api(self):
@@ -245,6 +255,80 @@ class RuntimeKernelTest(unittest.TestCase):
         gmail = next(item for item in reloaded if item["id"] == "gmail")
         self.assertTrue(gmail["implemented"])
         self.assertIn("gmail.readonly", gmail["scopes"])
+
+    def test_operator_catalog_exposes_configured_and_unconfigured_operators(self):
+        old_store, old_registry, old_directory = api_main.store, api_main.registry, api_main.directory
+        tmp = Path.cwd() / ".tmp"; tmp.mkdir(exist_ok=True)
+        store = Store(tmp / f"autopilot-{uuid4().hex}.db")
+        api_main.store = store
+        api_main.registry = default_registry()
+        api_main.directory = ConnectorDirectory(store)
+        try:
+            client = TestClient(api_main.app)
+            response = client.get("/api/operators")
+            self.assertEqual(response.status_code, 200, response.text)
+            operators = {item["id"]: item for item in response.json()}
+            for key in ["github", "gmail", "google_drive", "local_artifacts", "slack", "weather"]:
+                self.assertIn(key, operators)
+                self.assertTrue(operators[key]["tools"] or operators[key]["safe_actions"])
+            # GitHub now always reports configured:True — anonymous public search active
+            self.assertTrue(operators["github"]["configured"])
+            self.assertEqual(operators["github"]["readiness"]["mode"], "anonymous_public")
+            self.assertTrue(operators["weather"]["configured"])
+        finally:
+            api_main.store, api_main.registry, api_main.directory = old_store, old_registry, old_directory
+
+    def test_operator_probe_runs_local_artifact_side_effect(self):
+        old_store, old_registry, old_directory = api_main.store, api_main.registry, api_main.directory
+        tmp = Path.cwd() / ".tmp"; tmp.mkdir(exist_ok=True)
+        store = Store(tmp / f"autopilot-{uuid4().hex}.db")
+        api_main.store = store
+        api_main.registry = default_registry()
+        api_main.directory = ConnectorDirectory(store)
+        try:
+            with patch("autopilot.connectors.actions.ARTIFACT_DIR", tmp):
+                client = TestClient(api_main.app)
+                response = client.post("/api/operators/local_artifacts/probe", json={})
+            self.assertEqual(response.status_code, 200, response.text)
+            body = response.json()
+            self.assertEqual(body["status"], "complete")
+            self.assertEqual(body["kind"], "write")
+            self.assertTrue(Path(body["output"]["artifact_path"]).exists())
+        finally:
+            api_main.store, api_main.registry, api_main.directory = old_store, old_registry, old_directory
+
+    def test_operator_probe_runs_knowledge_search(self):
+        client = TestClient(api_main.app)
+        response = client.post("/api/operators/web_search/probe", json={"query": "export rollout failure"})
+        self.assertEqual(response.status_code, 200, response.text)
+        body = response.json()
+        self.assertEqual(body["kind"], "search")
+        self.assertGreater(len(body["output"]), 0)
+
+    def test_operator_action_contracts_match_declared_safe_actions(self):
+        async def scenario():
+            gmail = await GmailConnector().action("draft_reply", {"thread_id": "t1", "to": "ops@example.com", "body": "hello"})
+            self.assertEqual(gmail.action, "draft_reply")
+            self.assertEqual(gmail.status, "blocked")
+
+            drive = await GoogleDriveConnector().action("create_doc", {"title": "Brief", "body": "hello"})
+            self.assertEqual(drive.action, "create_doc")
+            self.assertEqual(drive.status, "blocked")
+
+            notion = await NotionConnector().action("create_page", {"title": "Brief", "body": "hello"})
+            self.assertEqual(notion.action, "create_page")
+            self.assertEqual(notion.status, "blocked")
+        asyncio.run(scenario())
+
+    def test_weather_connector_has_no_key_fallback(self):
+        old_key = os.environ.pop("OPENWEATHER_API_KEY", None)
+        try:
+            readiness = WeatherConnector().readiness()
+            self.assertTrue(readiness["configured"])
+            self.assertEqual(readiness["mode"], "open_meteo_fallback")
+        finally:
+            if old_key:
+                os.environ["OPENWEATHER_API_KEY"] = old_key
 
     def test_artifact_action_packet_uses_canonical_action_name(self):
         async def scenario():

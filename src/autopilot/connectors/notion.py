@@ -165,6 +165,15 @@ class NotionConnector(Connector):
         except Exception as e:
             return ActionResult(connector="notion", action="create_page", status="failed", summary=str(e))
 
+    async def action(self, name: str, payload: dict[str, Any]) -> ActionResult:
+        if name != "create_page":
+            return ActionResult(connector="notion", action=name, status="skipped", summary=f"Unknown action: {name}")
+        return await self.write(
+            payload.get("title", "AUTOPILOT Mission Brief"),
+            payload.get("body", payload.get("content", "")),
+            payload,
+        )
+
     def as_tools(self):
         from autopilot.agents.base import Tool
         return [

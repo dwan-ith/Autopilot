@@ -65,7 +65,15 @@ class GmailConnector(Connector):
                 mcp_tool=True,
             ),
             ConnectorToolSpec(
-                name="gmail_send_message",
+                name="gmail_draft_reply",
+                description="Create a Gmail draft for human review.",
+                capability=Capability.WRITE,
+                input_schema={"thread_id": "Thread ID", "to": "Recipient", "subject": "Subject", "body": "Draft body"},
+                output="ActionResult",
+                mcp_tool=True,
+            ),
+            ConnectorToolSpec(
+                name="gmail_send_approved_reply",
                 description="Send an approved email message.",
                 capability=Capability.ACTION,
                 input_schema={"to": "Recipient", "subject": "Subject", "body": "Message body"},
@@ -188,34 +196,71 @@ class GmailConnector(Connector):
             return {"ref": ref, "error": str(e)}
 
     async def action(self, name: str, payload: dict[str, Any]) -> ActionResult:
-        if name == "gmail_send_message":
-            return await self._send(payload)
+        if name in {"draft_reply", "gmail_draft_reply"}:
+            return await self._draft_reply(payload)
+        if name in {"send_approved_reply", "gmail_send_approved_reply", "gmail_send_message"}:
+            return await self._send(payload, action_name=name)
         return ActionResult(connector="gmail", action=name, status="skipped", summary=f"Unknown action: {name}")
 
-    async def _send(self, payload: dict[str, Any]) -> ActionResult:
+    def _raw_email(self, payload: dict[str, Any]) -> str:
+        headers = [
+            f"To: {payload.get('to', '')}",
+            f"Subject: {payload.get('subject', 'AUTOPILOT notification')}",
+            "Content-Type: text/plain; charset=utf-8",
+        ]
+        raw_email = "\r\n".join(headers) + "\r\n\r\n" + payload.get("body", "")
+        return base64.urlsafe_b64encode(raw_email.encode()).decode().rstrip("=")
+
+    async def _draft_reply(self, payload: dict[str, Any]) -> ActionResult:
         headers = await self._headers()
         if not headers:
-            return ActionResult(connector="gmail", action="send", status="blocked", summary="Gmail not authorized")
-        to = payload.get("to", "")
-        subject = payload.get("subject", "AUTOPILOT notification")
-        body = payload.get("body", "")
-        raw_email = f"To: {to}\r\nSubject: {subject}\r\nContent-Type: text/plain\r\n\r\n{body}"
-        encoded = base64.urlsafe_b64encode(raw_email.encode()).decode().rstrip("=")
+            return ActionResult(connector="gmail", action="draft_reply", status="blocked", summary="Gmail not authorized")
         try:
             async with httpx.AsyncClient(timeout=15) as client:
                 resp = await client.post(
-                    f"{GMAIL_API}/messages/send",
+                    f"{GMAIL_API}/drafts",
                     headers=headers,
-                    json={"raw": encoded},
+                    json={"message": {"raw": self._raw_email(payload), "threadId": payload.get("thread_id")}},
                 )
+                resp.raise_for_status()
+                draft = resp.json()
+                return ActionResult(
+                    connector="gmail",
+                    action="draft_reply",
+                    status="complete",
+                    summary=f"Created Gmail draft {draft.get('id', '')}.",
+                    metadata={"draft_id": draft.get("id"), "thread_id": payload.get("thread_id")},
+                )
+        except Exception as e:
+            return ActionResult(connector="gmail", action="draft_reply", status="failed", summary=str(e))
+
+    async def _send(self, payload: dict[str, Any], action_name: str = "send_approved_reply") -> ActionResult:
+        headers = await self._headers()
+        if not headers:
+            return ActionResult(connector="gmail", action=action_name, status="blocked", summary="Gmail not authorized")
+        try:
+            async with httpx.AsyncClient(timeout=15) as client:
+                if payload.get("draft_id"):
+                    resp = await client.post(
+                        f"{GMAIL_API}/drafts/send",
+                        headers=headers,
+                        json={"id": payload["draft_id"]},
+                    )
+                else:
+                    resp = await client.post(
+                        f"{GMAIL_API}/messages/send",
+                        headers=headers,
+                        json={"raw": self._raw_email(payload), "threadId": payload.get("thread_id")},
+                    )
                 resp.raise_for_status()
                 msg_id = resp.json().get("id", "")
                 return ActionResult(
-                    connector="gmail", action="send", status="complete",
-                    summary=f"Sent to {to}: '{subject}' (id={msg_id})",
+                    connector="gmail", action=action_name, status="complete",
+                    summary=f"Sent approved Gmail message (id={msg_id})",
+                    metadata={"message_id": msg_id, "draft_id": payload.get("draft_id")},
                 )
         except Exception as e:
-            return ActionResult(connector="gmail", action="send", status="failed", summary=str(e))
+            return ActionResult(connector="gmail", action=action_name, status="failed", summary=str(e))
 
     async def normalize_event(self, payload: dict[str, Any]) -> Signal:
         msg = payload.get("message", {})

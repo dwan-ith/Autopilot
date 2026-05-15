@@ -234,6 +234,59 @@ class GoogleDriveConnector(Connector):
         except Exception as e:
             return ActionResult(connector="google_drive", action="create_doc", status="failed", summary=str(e))
 
+    async def action(self, name: str, payload: dict[str, Any]) -> ActionResult:
+        if name == "create_doc":
+            return await self.write(
+                payload.get("title", "AUTOPILOT Mission Brief"),
+                payload.get("body", payload.get("content", "")),
+                payload,
+            )
+        if name == "append_to_doc":
+            return await self._append_to_doc(payload)
+        return ActionResult(connector="google_drive", action=name, status="skipped", summary=f"Unknown action: {name}")
+
+    async def _append_to_doc(self, payload: dict[str, Any]) -> ActionResult:
+        headers = await self._headers()
+        if not headers:
+            return ActionResult(connector="google_drive", action="append_to_doc", status="blocked", summary="Not authorized")
+        doc_id = payload.get("doc_id") or payload.get("document_id")
+        body = payload.get("body") or payload.get("content") or ""
+        if not doc_id or not body:
+            return ActionResult(
+                connector="google_drive",
+                action="append_to_doc",
+                status="failed",
+                summary="doc_id and body are required.",
+            )
+        try:
+            async with httpx.AsyncClient(timeout=20) as client:
+                doc_resp = await client.get(f"{DOCS_API}/{doc_id}", headers=headers)
+                doc_resp.raise_for_status()
+                content = doc_resp.json().get("body", {}).get("content", [])
+                end_index = max((item.get("endIndex", 1) for item in content), default=1)
+                update_resp = await client.post(
+                    f"{DOCS_API}/{doc_id}:batchUpdate",
+                    headers=headers,
+                    json={
+                        "requests": [{
+                            "insertText": {
+                                "location": {"index": max(1, end_index - 1)},
+                                "text": f"\n{body[:50000]}",
+                            }
+                        }]
+                    },
+                )
+                update_resp.raise_for_status()
+            return ActionResult(
+                connector="google_drive",
+                action="append_to_doc",
+                status="complete",
+                summary=f"Appended content to Google Doc {doc_id}.",
+                artifact_path=f"https://docs.google.com/document/d/{doc_id}/edit",
+            )
+        except Exception as e:
+            return ActionResult(connector="google_drive", action="append_to_doc", status="failed", summary=str(e))
+
     def as_tools(self):
         from autopilot.agents.base import Tool
         return [

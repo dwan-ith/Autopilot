@@ -40,7 +40,7 @@ from autopilot.connectors.oauth import (
     google_configured,
 )
 from autopilot.kernel import RuntimeKernel
-from autopilot.models import ActionResult, ApprovalStatus, AuthMode, GraphNodeKind, MissionGraphNode, Signal, StepStatus, WebhookSignalRequest, new_id, utc_now
+from autopilot.models import ActionResult, ApprovalStatus, AuthMode, Capability, GraphNodeKind, MissionGraphNode, Signal, StepStatus, WebhookSignalRequest, new_id, utc_now
 from autopilot.operators.llm import active_provider_name
 from autopilot.storage import ARTIFACT_DIR, ROOT, Store
 from fastapi.responses import RedirectResponse
@@ -70,12 +70,6 @@ logging.basicConfig(
 store = Store()
 registry = default_registry()
 directory = ConnectorDirectory(store)
-
-for cid, cls in CONNECTOR_CLASSES.items():
-    manifest = cls().manifest
-    if manifest.auth_required:
-        if cid not in [c.connector_id for c in store.list_connector_connections()]:
-            registry.unregister(manifest.name)
 
 runtime = RuntimeKernel(store, registry)
 
@@ -247,6 +241,130 @@ async def connectors() -> list[dict[str, Any]]:
 @app.get("/api/connector-directory")
 async def connector_directory() -> list[dict[str, Any]]:
     return directory.list()
+
+
+def _connector_for_operator(connector_id: str):
+    if connector_id in CONNECTOR_CLASSES:
+        return CONNECTOR_CLASSES[connector_id]()
+    if registry.has_name(connector_id):
+        return registry.get(connector_id)
+    for cls in CONNECTOR_CLASSES.values():
+        connector = cls()
+        if connector.manifest.name == connector_id:
+            return connector
+    raise KeyError(f"Unknown operator '{connector_id}'")
+
+
+@app.get("/api/operators")
+async def operators() -> list[dict[str, Any]]:
+    """Return the Scira-style operator surface: tools, actions, and readiness."""
+    connected = {item.connector_id: item for item in store.list_connector_connections()}
+    seen: set[str] = set()
+    items: list[dict[str, Any]] = []
+    for catalog_item in directory.catalog.values():
+        connector = _connector_for_operator(catalog_item.id) if catalog_item.id in CONNECTOR_CLASSES else None
+        readiness = connector.readiness() if connector else {"configured": False, "action_ready": False, "missing": [], "mode": "catalog_only", "detail": "No runtime adapter.", "action": None}
+        connection = connected.get(catalog_item.id)
+        items.append({
+            "id": catalog_item.id,
+            "name": catalog_item.name,
+            "runtime_name": connector.manifest.name if connector else catalog_item.id,
+            "category": catalog_item.category,
+            "description": catalog_item.description,
+            "status": connection.status.value if connection else "available",
+            "implemented": catalog_item.implemented,
+            "configured": readiness.get("configured", False),
+            "readiness": readiness,
+            "capabilities": [cap.value for cap in catalog_item.capabilities],
+            "tools": [tool.model_dump() for tool in catalog_item.tools],
+            "safe_actions": catalog_item.safe_actions,
+        })
+        seen.add(catalog_item.id)
+        if connector:
+            seen.add(connector.manifest.name)
+
+    for connector in registry._connectors.values():
+        if connector.manifest.name in seen:
+            continue
+        readiness = connector.readiness()
+        items.append({
+            "id": connector.manifest.name,
+            "name": connector.manifest.name,
+            "runtime_name": connector.manifest.name,
+            "category": connector.manifest.category,
+            "description": connector.manifest.description,
+            "status": "runtime",
+            "implemented": True,
+            "configured": readiness.get("configured", False),
+            "readiness": readiness,
+            "capabilities": [cap.value for cap in connector.manifest.capabilities],
+            "tools": [tool.model_dump() for tool in connector.manifest.tools],
+            "safe_actions": connector.manifest.safe_actions,
+        })
+    return sorted(items, key=lambda item: (item["category"], item["name"]))
+
+
+@app.post("/api/operators/{connector_id}/probe")
+async def probe_operator(connector_id: str, request: Request, payload: dict[str, Any] | None = None) -> dict[str, Any]:
+    """Run a bounded operator smoke probe.
+
+    Search/read probes are read-only. Artifact and notification probes are local
+    side effects so judges can verify that the system really acted.
+    """
+    require_write_access(request)
+    p = payload or {}
+    query = str(p.get("query") or p.get("ref") or "AUTOPILOT export rollout incident")
+    connector = _connector_for_operator(connector_id)
+    readiness = connector.readiness()
+    started = time.monotonic()
+    store.trace(None, "operator.probe.start", "started", {"operator": connector_id, "query": query})
+    try:
+        if connector.manifest.name == "artifact":
+            result = await connector.write(
+                f"operator-probe-{new_id('artifact')}",
+                "# AUTOPILOT Operator Probe\n\nLocal artifact connector wrote this file.",
+                {"operator": connector_id},
+            )
+            output: Any = result.model_dump()
+            kind = "write"
+        elif connector.manifest.name == "notification":
+            result = await connector.action("notify_ops", {"mission_id": "operator_probe", "text": "AUTOPILOT operator probe notification"})
+            output = result.model_dump()
+            kind = "notify"
+        elif connector.has(Capability.SEARCH):
+            output = [item.model_dump() for item in await connector.search(query)]
+            kind = "search"
+        else:
+            signal = await connector.normalize_event({
+                "summary": query,
+                "type": "operator.probe",
+                "entities": ["autopilot", connector_id],
+                "urgency": "medium",
+            })
+            output = signal.model_dump()
+            kind = "normalize"
+        elapsed = round((time.monotonic() - started) * 1000, 1)
+        response = {
+            "operator": connector_id,
+            "runtime_name": connector.manifest.name,
+            "kind": kind,
+            "status": "complete",
+            "readiness": readiness,
+            "duration_ms": elapsed,
+            "output": output,
+        }
+        store.trace(None, "operator.probe.complete", "complete", response)
+        return response
+    except Exception as exc:
+        response = {
+            "operator": connector_id,
+            "runtime_name": connector.manifest.name,
+            "status": "failed",
+            "readiness": readiness,
+            "error": str(exc),
+        }
+        store.trace(None, "operator.probe.failed", "failed", response)
+        return response
 
 @app.post("/api/connector-directory/{connector_id}/connect")
 async def connect_connector(connector_id: str, request: Request, payload: dict[str, Any] | None = None) -> dict[str, Any]:

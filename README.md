@@ -96,3 +96,16 @@ cd client
 npm run lint
 npm run build
 ```
+
+## Hackathon Demo
+
+See `HACKATHON_CHECKLIST.md` for the required-capability map, demo script, and
+rubric score estimate.
+
+Useful judge-facing endpoints:
+
+- `GET /api/operators`: all operators, tool schemas, safe actions, readiness.
+- `POST /api/operators/web_search/probe`: local knowledge/web-search probe.
+- `POST /api/operators/weather/probe`: weather probe with Open-Meteo fallback when no key is set.
+- `POST /api/operators/local_artifacts/probe`: real local artifact side effect.
+- `POST /demo/fire`: asynchronous three-signal autonomous mission.

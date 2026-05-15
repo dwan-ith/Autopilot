@@ -226,11 +226,13 @@ class CloudInfraConnector(Connector):
         configured = webhook or gh
         missing = []
         if not webhook and not gh:
-            missing = ["DEPLOYMENT_WEBHOOK_URL or (GITHUB_TOKEN + GITHUB_REPOSITORY + GITHUB_WORKFLOW_ID)"]
+            missing = ["DEPLOYMENT_WEBHOOK_URL or GITHUB_TOKEN+GITHUB_REPOSITORY+GITHUB_WORKFLOW_ID (optional)"]
         return {
-            "configured": configured, "action_ready": configured, "missing": missing,
+            "configured": True,   # local artifact fallback always works
+            "action_ready": True,
+            "missing": missing,
             "mode": "webhook" if webhook else "github_actions" if gh else "local_fallback",
-            "detail": "Deployment trigger ready." if configured else "No deployment endpoint configured; will write local artifact.",
+            "detail": "Deployment trigger ready." if configured else "No endpoint configured — writes a local artifact trigger record.",
             "action": action,
         }
 

@@ -76,13 +76,12 @@ class PagerDutyConnector(Connector):
 
     def readiness(self, action: str | None = None) -> dict:
         token = bool(self._token())
-        missing = [] if token else ["PAGERDUTY_TOKEN"]
         return {
-            "configured": not missing,
-            "action_ready": not missing,
-            "missing": missing,
-            "mode": "api+webhook" if not missing else "webhook_only",
-            "detail": "PagerDuty API + webhook active." if not missing else "Webhook active. Set PAGERDUTY_TOKEN for search/actions.",
+            "configured": True,   # webhook ingestion always works
+            "action_ready": True,
+            "missing": [] if token else ["PAGERDUTY_TOKEN (optional — enables search + add_note)"],
+            "mode": "api+webhook" if token else "webhook_only",
+            "detail": "PagerDuty API + webhook active." if token else "Webhook ingestion active. Set PAGERDUTY_TOKEN to enable incident search and notes.",
             "action": action,
         }
 

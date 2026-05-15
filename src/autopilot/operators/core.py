@@ -183,6 +183,7 @@ Return: {"action": "answer", "result": {"new_hypotheses": [
                     title=str(item.get("title", "Follow-up investigation")),
                     rationale=str(item.get("rationale", "")),
                     confidence=0.3,
+                    search_focus=str(item.get("search_focus", item.get("title", ""))),
                 ))
                 added += 1
 
@@ -192,6 +193,7 @@ Return: {"action": "answer", "result": {"new_hypotheses": [
                 title="Broad evidence sweep",
                 rationale=reason_text or f"Low confidence; run wider search around {entities}.",
                 confidence=0.3,
+                search_focus=f"{entities} {mission.title}".strip(),
             ))
         log.info("Replanner: added %d new hypotheses (replan #%d)", added or 1, mission.replans)
         return mission
@@ -281,8 +283,11 @@ Return: {"action": "answer", "result": {"new_hypotheses": [
             if decision.allowed:
                 actions.append(await packet_writers[0].action("write_action_packet", packet))
 
-        # 4. Notify ops
-        notifiers = self.registry.by_capability(Capability.NOTIFY)
+        # 4. Notify ops — use the first NOTIFY connector that has notify_ops in safe_actions
+        notifiers = [
+            c for c in self.registry.by_capability(Capability.NOTIFY)
+            if "notify_ops" in c.manifest.safe_actions
+        ]
         if notifiers:
             decision = await self.governor.decide_async(mission, notifiers[0], "notify_ops")
             mission.policy_decisions.append(decision)

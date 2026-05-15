@@ -68,13 +68,14 @@ class SentryConnector(Connector):
         import os
         token = bool(os.getenv("SENTRY_TOKEN"))
         org = bool(os.getenv("SENTRY_ORG"))
+        api_ready = token and org
         missing = ([] if token else ["SENTRY_TOKEN"]) + ([] if org else ["SENTRY_ORG"])
         return {
-            "configured": not missing,
-            "action_ready": not missing,
-            "missing": missing,
-            "mode": "api+webhook" if not missing else "webhook_only",
-            "detail": "Sentry API + webhook active." if not missing else f"Webhook active. Set {', '.join(missing)} for API search.",
+            "configured": True,   # webhook ingestion always works
+            "action_ready": True,
+            "missing": [f"{m} (optional — enables API search)" for m in missing],
+            "mode": "api+webhook" if api_ready else "webhook_only",
+            "detail": "Sentry API + webhook active." if api_ready else "Webhook ingestion active. Set SENTRY_TOKEN + SENTRY_ORG to enable issue search.",
             "action": action,
         }
 

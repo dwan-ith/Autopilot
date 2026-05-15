@@ -1,16 +1,37 @@
-"""Connector catalog — only connectors that have real implementations.
+"""Connector catalog for implemented adapters and MCP-ready app connectors.
 
-Catalog entries with `implemented=True` have actual connector classes
-that make real API calls. Entries with `implemented=False` are shown
-as "available" in the UI but will be greyed out.
-
-DO NOT add entries here that are pure theater. Every `implemented=True`
-entry must correspond to a real Connector subclass.
+Entries with ``implemented=True`` have real connector classes that can make
+runtime calls. Entries with ``implemented=False`` are typed app surfaces: scoped,
+explicit about auth and write risk, and ready for an MCP adapter, but not used
+by the runtime until a real adapter exists.
 """
 
 from __future__ import annotations
 
-from autopilot.models import AuthMode, Capability, ConnectorCatalogItem
+from autopilot.models import ActionRisk, AuthMode, Capability, ConnectorCatalogItem, ConnectorToolSpec
+
+
+def tool(
+    name: str,
+    description: str,
+    capability: Capability,
+    input_schema: dict[str, str],
+    output: str,
+    risk: ActionRisk = ActionRisk.LOW,
+    requires_confirmation: bool = False,
+) -> ConnectorToolSpec:
+    return ConnectorToolSpec(
+        name=name,
+        description=description,
+        capability=capability,
+        input_schema=input_schema,
+        output=output,
+        risk=risk,
+        requires_confirmation=requires_confirmation,
+        mcp_tool=True,
+        read_only_hint=capability in {Capability.READ, Capability.SEARCH},
+        destructive_hint=risk == ActionRisk.HIGH,
+    )
 
 
 CATALOG: list[ConnectorCatalogItem] = [
@@ -19,60 +40,51 @@ CATALOG: list[ConnectorCatalogItem] = [
         name="GitHub",
         category="Engineering",
         description=(
-            "Receive webhooks from GitHub issues, PRs, and deployments. "
-            "Search issues and PRs via GitHub REST API. Create follow-up issues and post comments."
+            "Receive GitHub webhooks, search issues and pull requests, read repository context, "
+            "and create reviewed follow-up issues or comments."
         ),
         icon="GH",
         auth_mode=AuthMode.API_KEY,
         capabilities=[Capability.READ, Capability.SEARCH, Capability.WRITE, Capability.ACTION],
         event_types=["issues.opened", "pull_request.opened", "deployment.created", "workflow_run.completed", "push"],
-        scopes=["repo", "issues:write"],
+        scopes=["repo", "issues:read", "issues:write", "pull_requests:read", "contents:read"],
         safe_actions=["create_issue", "post_comment"],
         implemented_actions=["create_issue", "post_comment"],
-        objects=["issues", "pull requests", "deployments", "commits"],
+        objects=["issues", "pull requests", "deployments", "commits", "workflow runs"],
+        tools=[
+            tool("github_search_issues", "Search issues and pull requests.", Capability.SEARCH, {"query": "Search terms", "repo": "Optional owner/repo"}, "Evidence[]"),
+            tool("github_read_issue", "Read an issue or pull request.", Capability.READ, {"ref": "owner/repo/issues/123 or owner/repo/pulls/456"}, "GitHub resource JSON"),
+            tool("github_create_issue", "Create a follow-up GitHub issue.", Capability.ACTION, {"repo": "owner/repo", "title": "Issue title", "body": "Markdown body"}, "ActionResult", ActionRisk.MEDIUM, True),
+            tool("github_post_comment", "Post a policy-approved issue or PR comment.", Capability.ACTION, {"repo": "owner/repo", "issue_number": "Issue or PR number", "body": "Markdown body"}, "ActionResult", ActionRisk.MEDIUM, True),
+        ],
         implemented=True,
     ),
     ConnectorCatalogItem(
-        id="sentry",
-        name="Sentry",
-        category="Observability",
-        description=(
-            "Ingest Sentry error and regression webhooks. Normalizes stack traces, "
-            "projects, and culprits into structured operational signals."
-        ),
-        icon="SE",
-        auth_mode=AuthMode.WEBHOOK,
-        capabilities=[Capability.READ, Capability.SEARCH],
-        event_types=["error.created", "issue.regression", "issue.created"],
-        scopes=["events.read"],
-        safe_actions=["mark_investigating"],
-        objects=["errors", "issues", "stack traces"],
-        implemented=True,
-    ),
-    ConnectorCatalogItem(
-        id="web_search",
-        name="Web Search",
-        category="Research",
-        description=(
-            "Search the public web for real-time context and external validation "
-            "via Tavily. Used by investigator sub-agents during evidence gathering."
-        ),
-        icon="WS",
-        auth_mode=AuthMode.API_KEY,
-        capabilities=[Capability.SEARCH, Capability.READ],
-        scopes=["web.search"],
-        safe_actions=[],
-        objects=["web pages", "documentation", "public knowledge"],
-        implemented=True,
+        id="gmail",
+        name="Gmail",
+        category="Communication",
+        description="Search mailbox context, read threads, draft replies, and send only after explicit approval.",
+        icon="GM",
+        auth_mode=AuthMode.OAUTH,
+        capabilities=[Capability.READ, Capability.SEARCH, Capability.WRITE, Capability.ACTION],
+        event_types=["message.received", "thread.updated"],
+        scopes=["gmail.readonly", "gmail.modify", "gmail.send"],
+        safe_actions=["draft_reply", "send_approved_reply", "apply_label"],
+        objects=["messages", "threads", "labels", "attachments"],
+        tools=[
+            tool("gmail_search_threads", "Search Gmail threads by query.", Capability.SEARCH, {"query": "Gmail search query", "max_results": "Maximum results"}, "Evidence[]"),
+            tool("gmail_read_thread", "Read a Gmail conversation thread.", Capability.READ, {"thread_id": "Gmail thread id"}, "Thread JSON"),
+            tool("gmail_draft_reply", "Create a reply draft for review.", Capability.WRITE, {"thread_id": "Thread id", "body": "Draft body"}, "ActionResult", ActionRisk.MEDIUM, True),
+            tool("gmail_send_approved_reply", "Send a previously reviewed reply.", Capability.ACTION, {"draft_id": "Draft id"}, "ActionResult", ActionRisk.HIGH, True),
+        ],
+        demo_available=False,
+        implemented=False,
     ),
     ConnectorCatalogItem(
         id="slack",
         name="Slack",
         category="Communication",
-        description=(
-            "Send bounded operational notifications to a Slack webhook "
-            "when mission confidence passes policy threshold."
-        ),
+        description="Send bounded operational notifications to a Slack webhook when policy allows.",
         icon="SL",
         auth_mode=AuthMode.WEBHOOK,
         capabilities=[Capability.NOTIFY, Capability.ACTION],
@@ -81,16 +93,126 @@ CATALOG: list[ConnectorCatalogItem] = [
         safe_actions=["notify_ops"],
         implemented_actions=["notify_ops"],
         objects=["messages"],
+        tools=[
+            tool("slack_notify_ops", "Post an approved operational notification.", Capability.NOTIFY, {"mission_id": "Mission id", "text": "Notification text"}, "ActionResult", ActionRisk.MEDIUM, True),
+        ],
         implemented=True,
+    ),
+    ConnectorCatalogItem(
+        id="google_drive",
+        name="Google Drive",
+        category="Knowledge",
+        description="Search and read Drive files as grounded context; publish reviewed briefs to shared folders.",
+        icon="GD",
+        auth_mode=AuthMode.OAUTH,
+        capabilities=[Capability.READ, Capability.SEARCH, Capability.WRITE],
+        event_types=["file.created", "file.updated"],
+        scopes=["drive.readonly", "drive.file"],
+        safe_actions=["create_doc", "append_to_doc"],
+        objects=["files", "folders", "docs", "sheets"],
+        tools=[
+            tool("drive_search_files", "Search Drive files by query.", Capability.SEARCH, {"query": "Drive search query", "mime_type": "Optional mime type"}, "Evidence[]"),
+            tool("drive_read_file", "Read a Drive file's text content.", Capability.READ, {"file_id": "Drive file id"}, "Document content"),
+            tool("drive_create_doc", "Create a reviewed mission document.", Capability.WRITE, {"title": "Document title", "body": "Document body"}, "ActionResult", ActionRisk.MEDIUM, True),
+        ],
+        demo_available=False,
+        implemented=False,
+    ),
+    ConnectorCatalogItem(
+        id="notion",
+        name="Notion",
+        category="Knowledge",
+        description="Search team knowledge bases and publish reviewed mission briefs.",
+        icon="NO",
+        auth_mode=AuthMode.OAUTH,
+        capabilities=[Capability.READ, Capability.SEARCH, Capability.WRITE],
+        scopes=["pages.read", "pages.write", "databases.read"],
+        safe_actions=["create_page"],
+        objects=["pages", "databases"],
+        tools=[
+            tool("notion_search", "Search Notion pages and databases.", Capability.SEARCH, {"query": "Search query"}, "Evidence[]"),
+            tool("notion_read_page", "Read a Notion page.", Capability.READ, {"page_id": "Page id"}, "Page content"),
+            tool("notion_create_page", "Create a reviewed Notion page.", Capability.WRITE, {"parent_id": "Parent page or database id", "title": "Page title", "body": "Page body"}, "ActionResult", ActionRisk.MEDIUM, True),
+        ],
+        demo_available=False,
+        implemented=False,
+    ),
+    ConnectorCatalogItem(
+        id="web_search",
+        name="Web Search",
+        category="Research",
+        description="Search public web context and external validation via local runbooks and optional Tavily.",
+        icon="WS",
+        auth_mode=AuthMode.API_KEY,
+        capabilities=[Capability.SEARCH, Capability.READ],
+        scopes=["web.search"],
+        safe_actions=[],
+        objects=["web pages", "documentation", "public knowledge"],
+        tools=[
+            tool("knowledge_search", "Search local runbooks and optional live web sources.", Capability.SEARCH, {"query": "Research query"}, "Evidence[]"),
+        ],
+        implemented=True,
+    ),
+    ConnectorCatalogItem(
+        id="sentry",
+        name="Sentry",
+        category="Observability",
+        description="Ingest Sentry error and regression webhooks as structured operational signals.",
+        icon="SE",
+        auth_mode=AuthMode.WEBHOOK,
+        capabilities=[Capability.READ, Capability.SEARCH],
+        event_types=["error.created", "issue.regression", "issue.created"],
+        scopes=["events.read", "issues.read"],
+        safe_actions=["mark_investigating"],
+        objects=["errors", "issues", "stack traces"],
+        tools=[
+            tool("sentry_ingest_issue", "Normalize Sentry issue webhooks.", Capability.READ, {"payload": "Webhook payload"}, "Signal"),
+            tool("sentry_search_issues", "Search issue and stack-trace context.", Capability.SEARCH, {"query": "Error, project, or culprit query"}, "Evidence[]"),
+        ],
+        implemented=True,
+    ),
+    ConnectorCatalogItem(
+        id="pagerduty",
+        name="PagerDuty",
+        category="Observability",
+        description="Receive incidents and post reviewed incident notes. MCP-ready, adapter pending.",
+        icon="PD",
+        auth_mode=AuthMode.OAUTH,
+        capabilities=[Capability.READ, Capability.ACTION, Capability.NOTIFY],
+        event_types=["incident.triggered", "incident.resolved"],
+        scopes=["incidents.read", "incidents.write"],
+        safe_actions=["add_note"],
+        objects=["incidents", "services"],
+        tools=[
+            tool("pagerduty_read_incident", "Read PagerDuty incident context.", Capability.READ, {"incident_id": "Incident id"}, "Incident JSON"),
+            tool("pagerduty_add_note", "Add an approved incident note.", Capability.ACTION, {"incident_id": "Incident id", "note": "Note body"}, "ActionResult", ActionRisk.MEDIUM, True),
+        ],
+        demo_available=False,
+        implemented=False,
+    ),
+    ConnectorCatalogItem(
+        id="jira",
+        name="Jira",
+        category="Engineering",
+        description="Search project issues and create reviewed incident follow-ups. MCP-ready, adapter pending.",
+        icon="JI",
+        auth_mode=AuthMode.OAUTH,
+        capabilities=[Capability.READ, Capability.SEARCH, Capability.WRITE, Capability.ACTION],
+        scopes=["read:jira-work", "write:jira-work"],
+        safe_actions=["create_issue", "add_comment"],
+        objects=["issues", "projects", "comments"],
+        tools=[
+            tool("jira_search_issues", "Search Jira issues with JQL.", Capability.SEARCH, {"jql": "Jira query language"}, "Evidence[]"),
+            tool("jira_create_issue", "Create an approved Jira issue.", Capability.ACTION, {"project_key": "Project key", "summary": "Issue summary", "description": "Issue body"}, "ActionResult", ActionRisk.MEDIUM, True),
+        ],
+        demo_available=False,
+        implemented=False,
     ),
     ConnectorCatalogItem(
         id="linear",
         name="Linear",
         category="Engineering",
-        description=(
-            "Create Linear issues for high-confidence missions when LINEAR_API_KEY "
-            "and LINEAR_TEAM_ID are configured. Uses the Linear GraphQL API."
-        ),
+        description="Create Linear issues for high-confidence missions when credentials are configured.",
         icon="LN",
         auth_mode=AuthMode.API_KEY,
         capabilities=[Capability.WRITE, Capability.ACTION],
@@ -98,16 +220,16 @@ CATALOG: list[ConnectorCatalogItem] = [
         safe_actions=["create_issue"],
         implemented_actions=["create_issue"],
         objects=["issues"],
+        tools=[
+            tool("linear_create_issue", "Create an approved Linear issue.", Capability.ACTION, {"title": "Issue title", "description": "Issue description"}, "ActionResult", ActionRisk.MEDIUM, True),
+        ],
         implemented=True,
     ),
     ConnectorCatalogItem(
         id="local_artifacts",
         name="Artifacts",
         category="System",
-        description=(
-            "Write durable Markdown reports and JSON action packets to the local "
-            "artifacts/ directory. Always active — no credentials required."
-        ),
+        description="Write durable Markdown reports and JSON action packets to the local artifact store.",
         icon="AR",
         auth_mode=AuthMode.NONE,
         capabilities=[Capability.WRITE, Capability.ACTION],
@@ -115,35 +237,11 @@ CATALOG: list[ConnectorCatalogItem] = [
         safe_actions=["write_report", "write_action_packet"],
         implemented_actions=["write_report", "write_action_packet"],
         objects=["reports", "action packets"],
+        tools=[
+            tool("artifact_write_report", "Write a durable Markdown report.", Capability.WRITE, {"name": "Artifact name", "content": "Markdown report"}, "ActionResult"),
+            tool("artifact_write_action_packet", "Write a structured JSON action packet.", Capability.ACTION, {"name": "Packet name", "payload": "Structured JSON payload"}, "ActionResult"),
+        ],
         implemented=True,
-    ),
-    # ── Coming soon (not implemented) ────────────────────────────────────
-    ConnectorCatalogItem(
-        id="pagerduty",
-        name="PagerDuty",
-        category="Observability",
-        description="Receive PagerDuty incidents and post updates. (Not yet implemented — planned.)",
-        icon="PD",
-        auth_mode=AuthMode.WEBHOOK,
-        capabilities=[Capability.READ, Capability.ACTION, Capability.NOTIFY],
-        event_types=["incident.triggered", "incident.resolved"],
-        scopes=["incidents.read"],
-        safe_actions=["add_note"],
-        objects=["incidents", "services"],
-        implemented=False,
-    ),
-    ConnectorCatalogItem(
-        id="notion",
-        name="Notion",
-        category="Knowledge",
-        description="Read team knowledge bases and publish mission briefs. (Not yet implemented — planned.)",
-        icon="NO",
-        auth_mode=AuthMode.API_KEY,
-        capabilities=[Capability.READ, Capability.SEARCH, Capability.WRITE],
-        scopes=["pages.read", "pages.write"],
-        safe_actions=["create_page"],
-        objects=["pages", "databases"],
-        implemented=False,
     ),
 ]
 

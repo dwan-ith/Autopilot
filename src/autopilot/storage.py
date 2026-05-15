@@ -8,7 +8,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-from autopilot.models import AuthMode, ConnectorConnection, ConnectorStatus, Mission, MissionStatus, OperatorStep, Signal, utc_now
+from autopilot.models import ApprovalStatus, AuthMode, ConnectorConnection, ConnectorStatus, Mission, MissionStatus, OperatorStep, Signal, utc_now
 
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -172,6 +172,11 @@ class Store:
                 mission.policy_decisions.extend(
                     decision for decision in existing.policy_decisions if decision.id not in seen_policies
                 )
+
+                seen_approvals = {approval.id for approval in mission.approvals}
+                mission.approvals.extend(
+                    approval for approval in existing.approvals if approval.id not in seen_approvals
+                )
             mission.updated_at = utc_now()
             with closing(self.connect()) as conn, conn:
                 conn.execute(
@@ -213,12 +218,12 @@ class Store:
         with self._lock, closing(self.connect()) as conn, conn:
             rows = conn.execute(
                 """
-                select id, status, title, severity, summary, confidence, replans, created_at, updated_at, completed_at
+                select payload
                 from missions order by datetime(updated_at) desc limit ?
                 """,
                 (limit,),
             ).fetchall()
-        return [dict(row) for row in rows]
+        return [Mission.model_validate_json(row["payload"]).model_dump() for row in rows]
 
     def active_missions(self) -> list[Mission]:
         with self._lock, closing(self.connect()) as conn, conn:
@@ -243,6 +248,32 @@ class Store:
                 (idempotency_key,),
             ).fetchone()
         return Mission.model_validate_json(row["payload"]) if row else None
+
+    def list_action_approvals(self, status: ApprovalStatus | None = None) -> list[dict[str, Any]]:
+        approvals: list[dict[str, Any]] = []
+        for mission in self._all_missions():
+            for approval in mission.approvals:
+                if status and approval.status != status:
+                    continue
+                item = approval.model_dump()
+                item["mission_title"] = mission.title
+                item["mission_status"] = mission.status.value
+                item["confidence"] = mission.confidence
+                approvals.append(item)
+        approvals.sort(key=lambda item: item["requested_at"], reverse=True)
+        return approvals
+
+    def get_action_approval(self, approval_id: str) -> tuple[Mission, int] | None:
+        for mission in self._all_missions():
+            for index, approval in enumerate(mission.approvals):
+                if approval.id == approval_id:
+                    return mission, index
+        return None
+
+    def _all_missions(self) -> list[Mission]:
+        with self._lock, closing(self.connect()) as conn, conn:
+            rows = conn.execute("select payload from missions order by datetime(updated_at) desc").fetchall()
+        return [Mission.model_validate_json(row["payload"]) for row in rows]
 
     def add_step(self, step: OperatorStep) -> None:
         with self._lock, closing(self.connect()) as conn, conn:

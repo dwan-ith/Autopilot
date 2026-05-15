@@ -47,6 +47,20 @@ npm install
 npm run dev
 ```
 
+The frontend talks to the backend through same-origin Next rewrites by default:
+
+```text
+browser -> http://localhost:3000/api/* -> http://127.0.0.1:8090/api/*
+browser -> http://localhost:3000/demo/* -> http://127.0.0.1:8090/demo/*
+```
+
+If your backend runs somewhere else, set `AUTOPILOT_API_ORIGIN` before starting
+the frontend. If Turbopack is unstable on Windows, use `npm run dev:webpack`.
+
+Connector cards distinguish catalog availability, implemented adapters, and
+actual connected state. Demo-capable connectors can be connected from the UI;
+OAuth-only surfaces remain catalog entries until a real adapter is added.
+
 Open:
 
 ```text
@@ -173,6 +187,13 @@ Run the scoped agents directly:
 POST /api/agents/project-mgmt/create-issue
 POST /api/agents/cloud-infra/trigger-deployment
 POST /api/agents/security-audit/pr-open
+```
+
+Medium-risk write actions such as external issue creation are policy-blocked
+until a human approval flow exists. For trusted local demos only, set:
+
+```powershell
+$env:AUTOPILOT_AUTO_APPROVE_ACTIONS="1"
 ```
 
 ## Architecture

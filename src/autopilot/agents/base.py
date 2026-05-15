@@ -1,13 +1,14 @@
 """Sub-agent architecture for AUTOPILOT.
 
-A SubAgent is an autonomous reasoning unit that:
-  1. Receives a task from the orchestrator
-  2. Has access to a set of tools (connectors)
-  3. Runs a reason → tool → observe loop until it has an answer
-  4. Reports structured results back to the orchestrator
+Hierarchy
+---------
+PersistentAgent   — lives for the lifetime of the RuntimeKernel.
+                    Shares state across missions (memory, policy state, etc.)
 
-This is not a wrapper around a single LLM call. Each agent runs
-its own multi-step reasoning loop with real tool invocations.
+SubAgent          — spawned per-mission, per-task.
+                    Runs a bounded reason → tool_call → observe loop.
+
+Orchestrator      — runs multiple SubAgents in parallel with concurrency control.
 """
 
 from __future__ import annotations
@@ -25,6 +26,10 @@ from autopilot.operators.llm import parse_json, reason
 log = logging.getLogger("autopilot.agents")
 
 
+# ---------------------------------------------------------------------------
+# Data classes
+# ---------------------------------------------------------------------------
+
 @dataclass
 class ToolResult:
     """Result of a single tool invocation."""
@@ -38,7 +43,7 @@ class ToolResult:
 
 @dataclass
 class AgentStep:
-    """One step in the agent's reasoning loop."""
+    """One step in an agent's reasoning loop."""
     step_number: int
     thought: str
     tool_call: str | None = None
@@ -49,7 +54,7 @@ class AgentStep:
 
 @dataclass
 class AgentResult:
-    """Final output from a sub-agent."""
+    """Final output from a sub-agent run."""
     agent_id: str
     agent_role: str
     task: str
@@ -61,59 +66,57 @@ class AgentResult:
     error: str | None = None
 
 
+# ---------------------------------------------------------------------------
+# Tool
+# ---------------------------------------------------------------------------
+
 class Tool:
     """A capability exposed to a sub-agent."""
 
     def __init__(self, name: str, description: str, parameters: dict[str, str], fn):
         self.name = name
         self.description = description
-        self.parameters = parameters  # {param_name: description}
+        self.parameters = parameters
         self.fn = fn  # async callable
 
     def schema(self) -> dict[str, Any]:
-        return {
-            "name": self.name,
-            "description": self.description,
-            "parameters": self.parameters,
-        }
+        return {"name": self.name, "description": self.description, "parameters": self.parameters}
 
     async def execute(self, **kwargs) -> ToolResult:
         start = time.time()
         try:
             result = await self.fn(**kwargs)
             return ToolResult(
-                tool_name=self.name,
-                input=kwargs,
-                output=result,
-                success=True,
-                duration_ms=(time.time() - start) * 1000,
+                tool_name=self.name, input=kwargs, output=result,
+                success=True, duration_ms=(time.time() - start) * 1000,
             )
         except Exception as exc:
             return ToolResult(
-                tool_name=self.name,
-                input=kwargs,
-                output=None,
-                success=False,
-                duration_ms=(time.time() - start) * 1000,
+                tool_name=self.name, input=kwargs, output=None,
+                success=False, duration_ms=(time.time() - start) * 1000,
                 error=str(exc),
             )
 
 
-AGENT_SYSTEM_PROMPT = """\
+# ---------------------------------------------------------------------------
+# Shared system prompt template
+# ---------------------------------------------------------------------------
+
+_AGENT_SYSTEM_PROMPT = """\
 You are a specialized sub-agent in AUTOPILOT, an autonomous operator runtime.
 
-Your role: {role}
-Your task: {task}
+Role: {role}
+Task: {task}
 
-You have access to these tools:
+Role-specific instructions:
+{role_instructions}
+
+Available tools:
 {tool_descriptions}
 
-IMPORTANT RULES:
-- You MUST use tools to gather real data. Do NOT make up information.
-- After each tool call, reason about the result before deciding next steps.
-- When you have enough information, return your final answer.
+{tool_rule}
 
-Respond with EXACTLY one JSON object in one of these formats:
+Respond with EXACTLY one JSON object:
 
 To call a tool:
 {{"action": "tool", "tool": "tool_name", "input": {{"param": "value"}}}}
@@ -125,8 +128,16 @@ Do NOT include any text outside the JSON object.
 """
 
 
+# ---------------------------------------------------------------------------
+# SubAgent  (mission-scoped, bounded reasoning loop)
+# ---------------------------------------------------------------------------
+
 class SubAgent:
-    """An autonomous reasoning agent with tool-use capabilities."""
+    """Bounded JSON-speaking operator with real tool-use loop.
+
+    Each SubAgent has a *role* which pins it to a specific LLM key slot
+    (see operators/llm.py), so parallel agents never share a rate-limit bucket.
+    """
 
     def __init__(
         self,
@@ -134,58 +145,64 @@ class SubAgent:
         tools: list[Tool],
         max_steps: int = 8,
         temperature: float = 0.3,
+        system_prompt: str = "",
     ):
         self.id = f"agent_{uuid4().hex[:8]}"
         self.role = role
         self.tools = {tool.name: tool for tool in tools}
         self.max_steps = max_steps
         self.temperature = temperature
+        self.system_prompt = system_prompt.strip()
 
     async def run(self, task: str) -> AgentResult:
-        """Execute the agent's reasoning loop."""
+        """Execute the reason → tool_call → observe loop."""
         start = time.time()
         steps: list[AgentStep] = []
         tool_calls = 0
 
         tool_descriptions = "\n".join(
-            f"  - {tool.name}: {tool.description} (params: {json.dumps(tool.parameters)})"
-            for tool in self.tools.values()
+            f"  - {t.name}: {t.description} (params: {json.dumps(t.parameters)})"
+            for t in self.tools.values()
+        ) or "  - none (analysis-only role)"
+
+        tool_rule = (
+            "Use read/search tools to gather real data. Do not fabricate tool results."
+            if self.tools
+            else "You have no tools. Analyze the provided context and be explicit about uncertainty."
         )
 
-        system = AGENT_SYSTEM_PROMPT.format(
+        system = _AGENT_SYSTEM_PROMPT.format(
             role=self.role,
             task=task,
+            role_instructions=self.system_prompt or "Follow the task contract exactly.",
             tool_descriptions=tool_descriptions,
+            tool_rule=tool_rule,
         )
 
-        conversation_context = f"Task: {task}"
+        ctx = f"Task: {task}"
 
         for step_num in range(1, self.max_steps + 1):
             raw = await reason(
-                system,
-                conversation_context,
+                system, ctx,
+                role=self.role,
                 json_mode=True,
                 temperature=self.temperature,
             )
 
             if raw is None:
-                # No LLM available — return heuristic result
+                fallback_steps, fallback_answer, fallback_calls = await self._heuristic_fallback(task, steps)
                 return AgentResult(
-                    agent_id=self.id,
-                    agent_role=self.role,
-                    task=task,
-                    answer={"fallback": True, "message": "No LLM provider; using heuristic mode."},
-                    steps=steps,
+                    agent_id=self.id, agent_role=self.role, task=task,
+                    answer=fallback_answer, steps=fallback_steps,
                     total_duration_ms=(time.time() - start) * 1000,
-                    tool_calls_made=tool_calls,
+                    tool_calls_made=tool_calls + fallback_calls,
                     success=True,
                 )
 
             parsed = parse_json(raw)
             if not isinstance(parsed, dict):
-                log.warning("Agent %s step %d: unparseable response", self.id, step_num)
                 steps.append(AgentStep(step_number=step_num, thought=raw or ""))
-                conversation_context += f"\n\nYour last response was not valid JSON. Respond with EXACTLY one JSON object."
+                ctx += "\n\nYour last response was not valid JSON. Respond with EXACTLY one JSON object."
                 continue
 
             action = parsed.get("action", "")
@@ -194,9 +211,7 @@ class SubAgent:
                 result = parsed.get("result", parsed)
                 steps.append(AgentStep(step_number=step_num, thought=f"Final answer: {json.dumps(result)[:200]}"))
                 return AgentResult(
-                    agent_id=self.id,
-                    agent_role=self.role,
-                    task=task,
+                    agent_id=self.id, agent_role=self.role, task=task,
                     answer=result if isinstance(result, dict) else {"result": result},
                     steps=steps,
                     total_duration_ms=(time.time() - start) * 1000,
@@ -209,14 +224,8 @@ class SubAgent:
                 tool_input = parsed.get("input", {})
 
                 if tool_name not in self.tools:
-                    step = AgentStep(
-                        step_number=step_num,
-                        thought=f"Attempted unknown tool: {tool_name}",
-                        tool_call=tool_name,
-                        tool_input=tool_input,
-                    )
-                    steps.append(step)
-                    conversation_context += f"\n\nTool '{tool_name}' does not exist. Available tools: {list(self.tools.keys())}"
+                    steps.append(AgentStep(step_number=step_num, thought=f"Attempted unknown tool: {tool_name}"))
+                    ctx += f"\n\nTool '{tool_name}' does not exist. Available: {list(self.tools.keys())}"
                     continue
 
                 tool = self.tools[tool_name]
@@ -235,23 +244,22 @@ class SubAgent:
                 log.info(
                     "Agent %s [%s] step %d: %s → %s",
                     self.id, self.role, step_num, tool_name,
-                    "success" if tool_result.success else f"error: {tool_result.error}",
+                    "ok" if tool_result.success else f"err: {tool_result.error}",
                 )
 
-                # Feed tool result back into the conversation
-                result_str = json.dumps(tool_result.output, default=str)[:2000] if tool_result.success else f"ERROR: {tool_result.error}"
-                conversation_context += f"\n\nTool '{tool_name}' returned:\n{result_str}\n\nReason about this result and decide your next step."
+                result_str = (
+                    json.dumps(tool_result.output, default=str)[:2000]
+                    if tool_result.success
+                    else f"ERROR: {tool_result.error}"
+                )
+                ctx += f"\n\nTool '{tool_name}' returned:\n{result_str}\n\nReason about this and decide next step."
                 continue
 
-            # Unknown action
             steps.append(AgentStep(step_number=step_num, thought=f"Unknown action: {action}"))
-            conversation_context += "\n\nRespond with action 'tool' or 'answer' only."
+            ctx += "\n\nRespond with action 'tool' or 'answer' only."
 
-        # Max steps reached
         return AgentResult(
-            agent_id=self.id,
-            agent_role=self.role,
-            task=task,
+            agent_id=self.id, agent_role=self.role, task=task,
             answer={"incomplete": True, "steps_exhausted": True},
             steps=steps,
             total_duration_ms=(time.time() - start) * 1000,
@@ -260,29 +268,103 @@ class SubAgent:
             error="Max reasoning steps reached without final answer.",
         )
 
+    async def _heuristic_fallback(
+        self, task: str, steps: list[AgentStep],
+    ) -> tuple[list[AgentStep], dict[str, Any], int]:
+        search_tools = [
+            t for name, t in self.tools.items()
+            if "search" in name and not any(b in name for b in ["create", "post", "notify", "send"])
+        ]
+        if not search_tools:
+            return steps, {"fallback": True, "message": "No LLM provider; no read tools available."}, 0
+
+        gathered: list[Any] = []
+        calls = 0
+        for tool in search_tools[:3]:
+            query = self._query_from_task(task)
+            tr = await tool.execute(query=query)
+            calls += 1
+            steps.append(AgentStep(
+                step_number=len(steps) + 1,
+                thought=f"Heuristic fallback called {tool.name}",
+                tool_call=tool.name,
+                tool_input={"query": query},
+                tool_result=tr,
+            ))
+            if tr.success and isinstance(tr.output, list):
+                gathered.extend(tr.output)
+
+        return steps, {
+            "fallback": True,
+            "evidence_gathered": [],
+            "assessment": f"Heuristic mode: searched {calls} tool(s) — no LLM provider active.",
+            "confidence": 0.55 if gathered else 0.3,
+        }, calls
+
+    def _query_from_task(self, task: str) -> str:
+        lines = [line.strip() for line in task.splitlines() if line.strip()]
+        key_lines = [
+            line.split(":", 1)[1].strip()
+            for line in lines
+            if line.lower().startswith(("hypothesis:", "key entities:", "mission context:")) and ":" in line
+        ]
+        return " ".join(key_lines)[:240] or task[:240]
+
+
+# ---------------------------------------------------------------------------
+# PersistentAgent  (lives in RuntimeKernel, stateful across missions)
+# ---------------------------------------------------------------------------
+
+class PersistentAgent:
+    """Base class for agents that are instantiated once and called many times.
+
+    Persistent agents maintain no per-call state — all context is passed in.
+    They use SubAgent.run() internally but always return typed results.
+    """
+
+    role: str = "persistent"
+    default_max_steps: int = 4
+
+    def _make_subagent(self, tools: list[Tool] | None = None) -> SubAgent:
+        return SubAgent(
+            role=self.role,
+            tools=tools or [],
+            max_steps=self.default_max_steps,
+            temperature=0.3,
+            system_prompt=self._system_prompt(),
+        )
+
+    def _system_prompt(self) -> str:
+        raise NotImplementedError
+
+    async def _run(self, task: str, tools: list[Tool] | None = None) -> AgentResult:
+        return await self._make_subagent(tools).run(task)
+
+
+# ---------------------------------------------------------------------------
+# Orchestrator  (parallel sub-agent coordinator)
+# ---------------------------------------------------------------------------
 
 class Orchestrator:
-    """Decomposes a mission into sub-agent tasks and runs them in parallel."""
+    """Runs bounded sub-agent tasks in parallel."""
 
-    def __init__(self, tools: list[Tool], max_parallel: int = 5):
+    def __init__(self, tools: list[Tool], max_parallel: int = 6, system_prompt: str = ""):
         self.tools = tools
         self.max_parallel = max_parallel
+        self.system_prompt = system_prompt
 
     async def run_agents(self, tasks: list[tuple[str, str]]) -> list[AgentResult]:
         """Run multiple (role, task) pairs as parallel sub-agents.
 
-        Args:
-            tasks: List of (role, task_description) tuples.
-
-        Returns:
-            List of AgentResults in the same order.
+        Each role gets its own LLM key slot, so up to 6 agents run concurrently
+        without rate-limit interference.
         """
         semaphore = asyncio.Semaphore(self.max_parallel)
 
         async def run_one(role: str, task: str) -> AgentResult:
             async with semaphore:
-                agent = SubAgent(role=role, tools=self.tools)
-                log.info("Orchestrator: spawning sub-agent [%s] for: %.80s", role, task)
+                agent = SubAgent(role=role, tools=self.tools, system_prompt=self.system_prompt)
+                log.info("Orchestrator: spawning [%s] for: %.80s", role, task)
                 return await agent.run(task)
 
         results = await asyncio.gather(
@@ -290,21 +372,14 @@ class Orchestrator:
             return_exceptions=True,
         )
 
-        # Convert exceptions to failed AgentResults
         final: list[AgentResult] = []
         for i, result in enumerate(results):
             if isinstance(result, Exception):
                 role, task = tasks[i]
                 final.append(AgentResult(
-                    agent_id=f"agent_failed_{i}",
-                    agent_role=role,
-                    task=task,
-                    answer={},
-                    steps=[],
-                    total_duration_ms=0,
-                    tool_calls_made=0,
-                    success=False,
-                    error=str(result),
+                    agent_id=f"agent_failed_{i}", agent_role=role, task=task,
+                    answer={}, steps=[], total_duration_ms=0, tool_calls_made=0,
+                    success=False, error=str(result),
                 ))
             else:
                 final.append(result)

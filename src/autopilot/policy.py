@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import os
+
 from autopilot.connectors.base import Connector
 from autopilot.models import ActionRisk, Mission, PolicyDecision
 
@@ -26,6 +28,7 @@ class PolicyEngine:
 
     def __init__(self, high_risk_requires_human: bool = True):
         self.high_risk_requires_human = high_risk_requires_human
+        self.auto_approve_validation = os.getenv("AUTOPILOT_AUTO_APPROVE_ACTIONS", "").lower() in {"1", "true", "yes"}
 
     def decide(self, mission: Mission, connector: Connector, action: str) -> PolicyDecision:
         risk, required, requires_validation = self.ACTION_RULES.get(action, (ActionRisk.HIGH, 0.85, True))
@@ -61,6 +64,21 @@ class PolicyEngine:
                 reason=f"Mission confidence {mission.confidence:.2f} is below required {required:.2f}.",
                 risk=risk,
                 requires_validation=requires_validation,
+                confidence_required=required,
+                confidence_observed=mission.confidence,
+            )
+
+        if requires_validation and not self.auto_approve_validation:
+            return PolicyDecision(
+                connector=connector.manifest.name,
+                action=action,
+                allowed=False,
+                reason=(
+                    "Action passed confidence policy but requires human approval. "
+                    "Set AUTOPILOT_AUTO_APPROVE_ACTIONS=1 only for trusted demos."
+                ),
+                risk=risk,
+                requires_validation=True,
                 confidence_required=required,
                 confidence_observed=mission.confidence,
             )

@@ -30,6 +30,7 @@ class AuthMode(str, Enum):
     OAUTH = "oauth"
     WEBHOOK = "webhook"
     DEMO = "demo"
+    MCP = "mcp"
 
 
 class ConnectorStatus(str, Enum):
@@ -42,6 +43,13 @@ class ActionRisk(str, Enum):
     LOW = "low"
     MEDIUM = "medium"
     HIGH = "high"
+
+
+class ApprovalStatus(str, Enum):
+    PENDING = "pending"
+    EXECUTED = "executed"
+    REJECTED = "rejected"
+    FAILED = "failed"
 
 
 class MissionStatus(str, Enum):
@@ -64,6 +72,7 @@ class GraphNodeKind(str, Enum):
     SIGNAL = "signal"
     HYPOTHESIS = "hypothesis"
     BRANCH = "branch"
+    SUBAGENT = "subagent"
     OPERATOR = "operator"
     REPLAN = "replan"
     ACTION = "action"
@@ -71,12 +80,30 @@ class GraphNodeKind(str, Enum):
     VALIDATION = "validation"
 
 
+class ConnectorToolSpec(BaseModel):
+    name: str
+    description: str
+    capability: Capability
+    input_schema: dict[str, str] = Field(default_factory=dict)
+    output: str = "structured_result"
+    risk: ActionRisk = ActionRisk.LOW
+    requires_confirmation: bool = False
+    mcp_tool: bool = False
+    read_only_hint: bool = False
+    destructive_hint: bool = False
+
+
 class ConnectorManifest(BaseModel):
     name: str
     description: str
+    category: str = "System"
+    auth_mode: AuthMode = AuthMode.NONE
     capabilities: list[Capability]
     event_types: list[str] = Field(default_factory=list)
+    scopes: list[str] = Field(default_factory=list)
+    objects: list[str] = Field(default_factory=list)
     safe_actions: list[str] = Field(default_factory=list)
+    tools: list[ConnectorToolSpec] = Field(default_factory=list)
     reliability_score: float = Field(default=0.9, ge=0.0, le=1.0)
     auth_required: bool = False
 
@@ -94,6 +121,7 @@ class ConnectorCatalogItem(BaseModel):
     safe_actions: list[str] = Field(default_factory=list)
     implemented_actions: list[str] = Field(default_factory=list)
     objects: list[str] = Field(default_factory=list)
+    tools: list[ConnectorToolSpec] = Field(default_factory=list)
     demo_available: bool = True
     implemented: bool = False
 
@@ -162,6 +190,22 @@ class PolicyDecision(BaseModel):
     created_at: datetime = Field(default_factory=utc_now)
 
 
+class ActionApproval(BaseModel):
+    id: str = Field(default_factory=lambda: new_id("approval"))
+    mission_id: str
+    connector: str
+    action: str
+    payload: dict[str, Any] = Field(default_factory=dict)
+    risk: ActionRisk = ActionRisk.MEDIUM
+    reason: str
+    status: ApprovalStatus = ApprovalStatus.PENDING
+    requested_at: datetime = Field(default_factory=utc_now)
+    decided_at: datetime | None = None
+    decided_by: str | None = None
+    result: ActionResult | None = None
+    error: str | None = None
+
+
 class MissionGraphNode(BaseModel):
     id: str = Field(default_factory=lambda: new_id("node"))
     kind: GraphNodeKind
@@ -194,6 +238,23 @@ class OperatorStep(BaseModel):
     metadata: dict[str, Any] = Field(default_factory=dict)
 
 
+class AgentRun(BaseModel):
+    id: str = Field(default_factory=lambda: new_id("agent"))
+    role: str
+    status: StepStatus = StepStatus.STARTED
+    hypothesis_id: str | None = None
+    objective: str = ""
+    tools: list[str] = Field(default_factory=list)
+    tool_calls: int = 0
+    output_summary: str = ""
+    confidence: float = Field(default=0.0, ge=0.0, le=1.0)
+    duration_ms: float = 0.0
+    error: str | None = None
+    metadata: dict[str, Any] = Field(default_factory=dict)
+    created_at: datetime = Field(default_factory=utc_now)
+    completed_at: datetime | None = None
+
+
 class Mission(BaseModel):
     id: str = Field(default_factory=lambda: new_id("mission"))
     title: str
@@ -205,7 +266,9 @@ class Mission(BaseModel):
     evidence: list[Evidence] = Field(default_factory=list)
     actions: list[ActionResult] = Field(default_factory=list)
     policy_decisions: list[PolicyDecision] = Field(default_factory=list)
+    approvals: list[ActionApproval] = Field(default_factory=list)
     graph: list[MissionGraphNode] = Field(default_factory=list)
+    agent_runs: list[AgentRun] = Field(default_factory=list)
     confidence: float = Field(default=0.0, ge=0.0, le=1.0)
     replans: int = 0
     created_at: datetime = Field(default_factory=utc_now)

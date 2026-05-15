@@ -3,6 +3,8 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import os
+import secrets
 from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Any
@@ -12,15 +14,26 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, HTMLResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 
-from autopilot.agents import CloudInfraAgent, ProjectMgmtAgent, SecurityAuditAgent
 from autopilot.connectors import default_registry
 from autopilot.connectors.service import ConnectorDirectory
+from autopilot.connectors.github_connector import GitHubConnector
+from autopilot.connectors.knowledge import KnowledgeConnector
+from autopilot.connectors.actions import ArtifactConnector, LinearConnector, NotificationConnector
+from autopilot.connectors.webhook import SentryConnector, WebhookConnector
 from autopilot.kernel import RuntimeKernel
-from autopilot.models import AuthMode, ConnectorActionRequest, Signal, WebhookSignalRequest, new_id
+from autopilot.models import ActionResult, ApprovalStatus, AuthMode, GraphNodeKind, MissionGraphNode, Signal, StepStatus, WebhookSignalRequest, new_id, utc_now
 from autopilot.operators.llm import active_provider_name
-from autopilot.policy import PolicyEngine
-from autopilot.state_store import StateStore
-from autopilot.storage import ARTIFACT_DIR, ROOT
+from autopilot.storage import ARTIFACT_DIR, ROOT, Store
+
+CONNECTOR_CLASSES = {
+    "github": GitHubConnector,
+    "web_search": KnowledgeConnector,
+    "local_artifacts": ArtifactConnector,
+    "linear": LinearConnector,
+    "slack": NotificationConnector,
+    "sentry": SentryConnector,
+    "webhook": WebhookConnector,
+}
 
 logging.basicConfig(
     level=logging.INFO,
@@ -28,14 +41,29 @@ logging.basicConfig(
     datefmt="%H:%M:%S",
 )
 
-store = StateStore()
+store = Store()
 registry = default_registry()
 directory = ConnectorDirectory(store)
+
+for cid, cls in CONNECTOR_CLASSES.items():
+    manifest = cls().manifest
+    if manifest.auth_required:
+        if cid not in [c.connector_id for c in store.list_connector_connections()]:
+            registry.unregister(manifest.name)
+
 runtime = RuntimeKernel(store, registry)
-policy = PolicyEngine()
-project_mgmt_agent = ProjectMgmtAgent(store, registry, policy)
-cloud_infra_agent = CloudInfraAgent(store, registry, policy)
-security_audit_agent = SecurityAuditAgent(store, registry, policy)
+
+
+def require_write_access(request: Request) -> None:
+    expected = os.getenv("AUTOPILOT_API_KEY", "").strip()
+    if not expected:
+        return
+    supplied = request.headers.get("x-autopilot-key", "").strip()
+    authorization = request.headers.get("authorization", "").strip()
+    if authorization.lower().startswith("bearer "):
+        supplied = authorization[7:].strip()
+    if not supplied or not secrets.compare_digest(supplied, expected):
+        raise HTTPException(status_code=401, detail="AUTOPILOT_API_KEY is required for write operations")
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
@@ -49,10 +77,16 @@ app = FastAPI(
     lifespan=lifespan,
 )
 
+cors_origins = [
+    origin.strip()
+    for origin in os.getenv("AUTOPILOT_CORS_ORIGINS", "http://localhost:3000,http://127.0.0.1:3000").split(",")
+    if origin.strip()
+]
+
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
-    allow_credentials=True,
+    allow_origins=cors_origins,
+    allow_credentials=False,
     allow_methods=["*"],
     allow_headers=["*"],
 )
@@ -79,27 +113,16 @@ async def provider() -> dict[str, str]:
 
 @app.get("/api/connectors")
 async def connectors() -> list[dict[str, Any]]:
-    """Return real connector status based on actual env var configuration."""
-    import os
+    """Return runtime connector readiness based on actual configuration."""
     result = []
     for connector in registry._connectors.values():
         m = connector.manifest
-        # Determine if this connector is actually configured
-        env_checks = {
-            "github": bool(os.getenv("GITHUB_TOKEN")),
-            "linear": bool(os.getenv("LINEAR_API_KEY") and os.getenv("LINEAR_TEAM_ID")),
-            "notification": bool(os.getenv("SLACK_WEBHOOK_URL")),
-            "knowledge": True,  # Always works; Tavily is optional enhancement
-            "artifact": True,   # Always works; no credentials needed
-            "webhook": True,
-            "sentry": True,     # Inbound only; no credentials needed
-        }
-        configured = env_checks.get(m.name, not m.auth_required)
-        # Count available tools for this connector
+        readiness = connector.readiness()
         tool_count = len(connector.as_tools()) if hasattr(connector, "as_tools") else 0
         result.append({
             **m.model_dump(),
-            "configured": configured,
+            "configured": readiness["configured"],
+            "readiness": readiness,
             "tool_count": tool_count,
         })
     return result
@@ -110,7 +133,8 @@ async def connector_directory() -> list[dict[str, Any]]:
     return directory.list()
 
 @app.post("/api/connector-directory/{connector_id}/connect")
-async def connect_connector(connector_id: str, payload: dict[str, Any] | None = None) -> dict[str, Any]:
+async def connect_connector(connector_id: str, request: Request, payload: dict[str, Any] | None = None) -> dict[str, Any]:
+    require_write_access(request)
     try:
         auth_mode = None
         if payload and payload.get("auth_mode"):
@@ -121,85 +145,29 @@ async def connect_connector(connector_id: str, payload: dict[str, Any] | None = 
             credentials_ref=(payload or {}).get("credentials_ref"),
             metadata=(payload or {}).get("metadata") or {},
         )
+        if connector_id in CONNECTOR_CLASSES:
+            registry.register(CONNECTOR_CLASSES[connector_id]())
         store.trace(None, "connector.connected", "complete", connection.model_dump())
         return connection.model_dump()
     except KeyError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
 
 @app.post("/api/connector-directory/{connector_id}/disconnect")
-async def disconnect_connector(connector_id: str) -> dict[str, Any]:
+async def disconnect_connector(connector_id: str, request: Request) -> dict[str, Any]:
+    require_write_access(request)
     try:
         connection = directory.disconnect(connector_id)
+        if connector_id in CONNECTOR_CLASSES:
+            manifest_name = CONNECTOR_CLASSES[connector_id]().manifest.name
+            registry.unregister(manifest_name)
         store.trace(None, "connector.disconnected", "complete", connection.model_dump())
         return connection.model_dump()
     except KeyError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
 
-@app.post("/api/actions/{connector_name}/{action_name}")
-async def connector_action(connector_name: str, action_name: str, request: ConnectorActionRequest) -> dict[str, Any]:
-    if not registry.has_name(connector_name):
-        raise HTTPException(status_code=404, detail="Connector not found")
-
-    connector = registry.get(connector_name)
-    mission = store.get_mission(request.mission_id) if request.mission_id else None
-    payload = {**request.payload}
-    if request.mission_id:
-        payload.setdefault("mission_id", request.mission_id)
-
-    if mission:
-        decision = policy.decide(mission, connector, action_name)
-        mission.policy_decisions.append(decision)
-        store.update_mission(mission)
-        if not decision.allowed:
-            return {"allowed": False, "decision": decision.model_dump(), "action": None}
-    elif action_name not in connector.manifest.safe_actions:
-        raise HTTPException(status_code=400, detail="Action is not declared safe by connector")
-    else:
-        decision = None
-
-    result = await connector.action(action_name, payload)
-    store.trace(request.mission_id, f"connector.{connector_name}.{action_name}", result.status, result.model_dump())
-    return {
-        "allowed": True,
-        "decision": decision.model_dump() if decision else None,
-        "action": result.model_dump(),
-    }
-
-
-@app.post("/api/agents/project-mgmt/create-issue")
-async def run_project_mgmt_agent(payload: dict[str, Any]) -> dict[str, Any]:
-    result = await project_mgmt_agent.create_follow_up_issue(
-        mission_id=payload.get("mission_id"),
-        title=payload.get("title"),
-        description=payload.get("description"),
-        labels=payload.get("labels"),
-    )
-    return result.model_dump()
-
-
-@app.post("/api/agents/cloud-infra/trigger-deployment")
-async def run_cloud_infra_agent(payload: dict[str, Any]) -> dict[str, Any]:
-    result = await cloud_infra_agent.trigger_deployment(
-        mission_id=payload.get("mission_id"),
-        environment=payload.get("environment", "staging"),
-        ref=payload.get("ref", "main"),
-        reason=payload.get("reason", "AUTOPILOT deployment trigger"),
-        approved=bool(payload.get("approved", False)),
-    )
-    return result.model_dump()
-
-
-@app.post("/api/agents/security-audit/pr-open")
-async def run_security_audit_agent(payload: dict[str, Any]) -> dict[str, Any]:
-    result = await security_audit_agent.run_pr_open_audit(
-        payload=payload.get("payload", payload),
-        mission_id=payload.get("mission_id"),
-    )
-    return result.model_dump()
-
-
 @app.post("/webhooks/{connector_name}")
 async def webhook(connector_name: str, request: Request) -> dict[str, Any]:
+    require_write_access(request)
     payload = await request.json()
     connector = registry.get(connector_name) if registry.has_name(connector_name) else registry.get("webhook")
     signal = await connector.normalize_event(payload)
@@ -209,7 +177,8 @@ async def webhook(connector_name: str, request: Request) -> dict[str, Any]:
     return {"accepted": True, "mission_id": mission.id, "signal_id": signal.id, "status": mission.status}
 
 @app.post("/api/signals")
-async def create_signal(signal_request: WebhookSignalRequest) -> dict[str, Any]:
+async def create_signal(signal_request: WebhookSignalRequest, request: Request) -> dict[str, Any]:
+    require_write_access(request)
     signal = Signal(
         source=signal_request.source,
         type=signal_request.type,
@@ -222,7 +191,8 @@ async def create_signal(signal_request: WebhookSignalRequest) -> dict[str, Any]:
     return {"accepted": True, "mission_id": mission.id, "signal_id": signal.id}
 
 @app.post("/demo/fire")
-async def fire_demo() -> dict[str, Any]:
+async def fire_demo(request: Request) -> dict[str, Any]:
+    require_write_access(request)
     run_id = new_id("demo")
     first = Signal(
         source="support_webhook",
@@ -280,11 +250,107 @@ async def get_mission(mission_id: str) -> dict[str, Any]:
     }
 
 @app.post("/api/missions/{mission_id}/cancel")
-async def cancel_mission(mission_id: str, payload: dict[str, Any] | None = None) -> dict[str, Any]:
+async def cancel_mission(mission_id: str, request: Request, payload: dict[str, Any] | None = None) -> dict[str, Any]:
+    require_write_access(request)
     reason = (payload or {}).get("reason") or "Canceled from AUTOPILOT API"
     if not runtime.cancel(mission_id, reason):
         raise HTTPException(status_code=404, detail="Mission not found")
     return {"canceled": True, "mission_id": mission_id, "reason": reason}
+
+
+@app.get("/api/approvals")
+async def list_approvals(status: ApprovalStatus | None = ApprovalStatus.PENDING) -> list[dict[str, Any]]:
+    return store.list_action_approvals(status)
+
+
+@app.post("/api/approvals/{approval_id}/approve")
+async def approve_action(approval_id: str, request: Request, payload: dict[str, Any] | None = None) -> dict[str, Any]:
+    require_write_access(request)
+    found = store.get_action_approval(approval_id)
+    if not found:
+        raise HTTPException(status_code=404, detail="Approval not found")
+    mission, index = found
+    approval = mission.approvals[index]
+    if approval.status != ApprovalStatus.PENDING:
+        raise HTTPException(status_code=409, detail=f"Approval is already {approval.status.value}")
+    if not registry.has_name(approval.connector):
+        approval.status = ApprovalStatus.FAILED
+        approval.error = f"Connector '{approval.connector}' is not registered"
+        approval.decided_at = utc_now()
+        approval.decided_by = (payload or {}).get("decided_by") or "operator"
+        mission.approvals[index] = approval
+        store.update_mission(mission)
+        raise HTTPException(status_code=400, detail=approval.error)
+
+    connector = registry.get(approval.connector)
+    readiness = connector.readiness(approval.action)
+    if not readiness.get("action_ready"):
+        approval.status = ApprovalStatus.FAILED
+        approval.error = f"Connector is not ready: {readiness.get('detail')}"
+        approval.decided_at = utc_now()
+        approval.decided_by = (payload or {}).get("decided_by") or "operator"
+        mission.approvals[index] = approval
+        store.update_mission(mission)
+        store.trace(mission.id, "approval.failed", "failed", approval.model_dump())
+        return approval.model_dump()
+    try:
+        result = await connector.action(approval.action, approval.payload)
+        approval.result = result
+        approval.decided_at = utc_now()
+        approval.decided_by = (payload or {}).get("decided_by") or "operator"
+        approval.status = ApprovalStatus.EXECUTED if result.status in {"complete", "skipped"} else ApprovalStatus.FAILED
+        approval.error = None if approval.status == ApprovalStatus.EXECUTED else result.summary
+        mission.approvals[index] = approval
+        mission.actions.append(result)
+        mission.graph.append(
+            MissionGraphNode(
+                kind=GraphNodeKind.ACTION,
+                title=f"Approved action: {approval.connector}.{approval.action}",
+                status=StepStatus.COMPLETE if approval.status == ApprovalStatus.EXECUTED else StepStatus.FAILED,
+                ref_id=result.id,
+                summary=result.summary,
+                completed_at=utc_now(),
+                metadata={"approval": approval.model_dump(), "result": result.model_dump()},
+            )
+        )
+        store.update_mission(mission)
+        store.trace(mission.id, "approval.executed", approval.status.value, approval.model_dump())
+        return approval.model_dump()
+    except Exception as exc:
+        approval.status = ApprovalStatus.FAILED
+        approval.error = str(exc)
+        approval.decided_at = utc_now()
+        approval.decided_by = (payload or {}).get("decided_by") or "operator"
+        approval.result = ActionResult(
+            connector=approval.connector,
+            action=approval.action,
+            status="failed",
+            summary=str(exc),
+        )
+        mission.approvals[index] = approval
+        store.update_mission(mission)
+        store.trace(mission.id, "approval.failed", "failed", approval.model_dump())
+        return approval.model_dump()
+
+
+@app.post("/api/approvals/{approval_id}/reject")
+async def reject_action(approval_id: str, request: Request, payload: dict[str, Any] | None = None) -> dict[str, Any]:
+    require_write_access(request)
+    found = store.get_action_approval(approval_id)
+    if not found:
+        raise HTTPException(status_code=404, detail="Approval not found")
+    mission, index = found
+    approval = mission.approvals[index]
+    if approval.status != ApprovalStatus.PENDING:
+        raise HTTPException(status_code=409, detail=f"Approval is already {approval.status.value}")
+    approval.status = ApprovalStatus.REJECTED
+    approval.decided_at = utc_now()
+    approval.decided_by = (payload or {}).get("decided_by") or "operator"
+    approval.error = (payload or {}).get("reason") or "Rejected by operator"
+    mission.approvals[index] = approval
+    store.update_mission(mission)
+    store.trace(mission.id, "approval.rejected", "rejected", approval.model_dump())
+    return approval.model_dump()
 
 @app.get("/api/traces")
 async def traces() -> list[dict[str, Any]]:

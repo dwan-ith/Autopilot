@@ -45,6 +45,9 @@ class ConnectorRegistry:
     def get(self, name: str) -> Connector:
         return self._connectors[name]
 
+    def unregister(self, name: str) -> None:
+        self._connectors.pop(name, None)
+
     def has_name(self, name: str) -> bool:
         return name in self._connectors
 

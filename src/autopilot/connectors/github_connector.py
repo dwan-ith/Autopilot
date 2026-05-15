@@ -22,8 +22,10 @@ from autopilot.agents.base import Tool
 from autopilot.connectors.base import Connector
 from autopilot.models import (
     ActionResult,
+    ActionRisk,
     Capability,
     ConnectorManifest,
+    ConnectorToolSpec,
     Evidence,
     Signal,
 )
@@ -52,6 +54,8 @@ class GitHubConnector(Connector):
     manifest = ConnectorManifest(
         name="github",
         description="Connects to GitHub: search issues/PRs, read repository context, create issues, post comments.",
+        category="Engineering",
+        auth_mode="api_key",
         capabilities=[Capability.READ, Capability.SEARCH, Capability.WRITE, Capability.ACTION],
         event_types=[
             "issues.opened",
@@ -62,13 +66,58 @@ class GitHubConnector(Connector):
             "push",
             "workflow_run.completed",
         ],
+        scopes=["repo", "issues:read", "issues:write", "pull_requests:read", "contents:read"],
+        objects=["repositories", "issues", "pull requests", "deployments", "commits", "workflow runs"],
         safe_actions=["create_issue", "post_comment"],
+        tools=[
+            ConnectorToolSpec(
+                name="github_search_issues",
+                description="Search GitHub issues and pull requests by query, optionally scoped to a repository.",
+                capability=Capability.SEARCH,
+                input_schema={"query": "Search terms", "repo": "Optional owner/repo scope"},
+                output="Evidence[]",
+                mcp_tool=True,
+            ),
+            ConnectorToolSpec(
+                name="github_read_issue",
+                description="Read issue, pull request, or repository content details by ref.",
+                capability=Capability.READ,
+                input_schema={"ref": "owner/repo/issues/123, owner/repo/pulls/456, or owner/repo/contents/path"},
+                output="GitHub resource JSON",
+                mcp_tool=True,
+            ),
+            ConnectorToolSpec(
+                name="github_create_issue",
+                description="Create a follow-up issue after policy approval.",
+                capability=Capability.ACTION,
+                input_schema={"repo": "owner/repo", "title": "Issue title", "body": "Markdown body", "labels": "Optional labels"},
+                output="ActionResult",
+                risk=ActionRisk.MEDIUM,
+                requires_confirmation=True,
+                mcp_tool=True,
+            ),
+        ],
         reliability_score=0.96,
         auth_required=True,
     )
 
     def _default_repo(self) -> str | None:
         return os.getenv("GITHUB_REPO", "").strip() or None
+
+    def readiness(self, action: str | None = None) -> dict[str, Any]:
+        missing = []
+        if not _token():
+            missing.append("GITHUB_TOKEN")
+        if action in {"create_issue", "post_comment"} and not self._default_repo():
+            missing.append("GITHUB_REPO")
+        return {
+            "configured": not missing,
+            "action_ready": not missing,
+            "missing": missing,
+            "mode": "api_key" if not missing else "missing_credentials",
+            "detail": "GitHub API access is configured." if not missing else "GitHub token/repository configuration is incomplete.",
+            "action": action,
+        }
 
     async def normalize_event(self, payload: dict[str, Any]) -> Signal:
         """Normalize a real GitHub webhook payload into a Signal."""
@@ -375,16 +424,5 @@ class GitHubConnector(Connector):
                     "ref": "Format: 'owner/repo/issues/123' or 'owner/repo/pulls/456'",
                 },
                 fn=self.read,
-            ),
-            Tool(
-                name="github_create_issue",
-                description="Create a new GitHub issue as a follow-up action.",
-                parameters={
-                    "repo": "owner/repo",
-                    "title": "Issue title",
-                    "body": "Issue body in Markdown",
-                    "labels": "(optional) list of label names",
-                },
-                fn=lambda **kw: self.action("create_issue", kw),
             ),
         ]

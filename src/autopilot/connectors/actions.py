@@ -7,7 +7,7 @@ from pathlib import Path
 import httpx
 
 from autopilot.connectors.base import Connector
-from autopilot.models import ActionResult, Capability, ConnectorManifest
+from autopilot.models import ActionResult, ActionRisk, Capability, ConnectorManifest, ConnectorToolSpec
 from autopilot.storage import ARTIFACT_DIR
 
 
@@ -15,11 +15,40 @@ class ArtifactConnector(Connector):
     manifest = ConnectorManifest(
         name="artifact",
         description="Writes durable local reports, action packets, and audit artifacts.",
+        category="System",
         capabilities=[Capability.WRITE, Capability.ACTION],
+        objects=["reports", "action packets", "audit artifacts"],
         event_types=[],
         safe_actions=["write_report", "write_action_packet"],
+        tools=[
+            ConnectorToolSpec(
+                name="artifact_write_report",
+                description="Write a durable Markdown mission report to the local artifact store.",
+                capability=Capability.WRITE,
+                input_schema={"name": "Artifact name", "content": "Markdown report", "metadata": "Optional metadata"},
+                output="ActionResult",
+            ),
+            ConnectorToolSpec(
+                name="artifact_write_action_packet",
+                description="Write a structured JSON action packet for downstream review or automation.",
+                capability=Capability.ACTION,
+                input_schema={"name": "Packet name", "payload": "Structured action payload"},
+                output="ActionResult",
+                risk=ActionRisk.LOW,
+            ),
+        ],
         reliability_score=0.99,
     )
+
+    def readiness(self, action: str | None = None) -> dict:
+        return {
+            "configured": True,
+            "action_ready": True,
+            "missing": [],
+            "mode": "local",
+            "detail": "Local artifact store is available.",
+            "action": action,
+        }
 
     async def write(self, name: str, content: str, metadata: dict | None = None) -> ActionResult:
         safe_name = "".join(ch if ch.isalnum() or ch in ("-", "_") else "-" for ch in name).strip("-")
@@ -36,11 +65,21 @@ class ArtifactConnector(Connector):
         )
 
     async def action(self, name: str, payload: dict) -> ActionResult:
-        path = ARTIFACT_DIR / f"{name}.json"
+        if name != "write_action_packet":
+            return ActionResult(
+                connector=self.manifest.name,
+                action=name,
+                status="failed",
+                summary=f"Unknown artifact action: {name}",
+                metadata={"safe_actions": self.manifest.safe_actions},
+            )
+        packet_name = payload.get("packet_name") or f"action-packet-{payload.get('mission_id', 'unknown')}"
+        safe_name = "".join(ch if ch.isalnum() or ch in ("-", "_") else "-" for ch in str(packet_name)).strip("-")
+        path = ARTIFACT_DIR / f"{safe_name}.json"
         path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
         return ActionResult(
             connector=self.manifest.name,
-            action=name,
+            action="write_action_packet",
             status="complete",
             summary=f"Recorded action payload {path.name}",
             artifact_path=str(path),
@@ -52,12 +91,57 @@ class NotificationConnector(Connector):
     manifest = ConnectorManifest(
         name="notification",
         description="Sends bounded outbound notifications through Slack webhook when configured, otherwise logs locally.",
+        category="Communication",
+        auth_mode="webhook",
         capabilities=[Capability.NOTIFY, Capability.ACTION],
+        scopes=["chat.write"],
+        objects=["messages", "incident updates"],
         event_types=[],
         safe_actions=["notify_ops", "webhook_callback"],
+        tools=[
+            ConnectorToolSpec(
+                name="slack_notify_ops",
+                description="Send an approved operational notification to Slack or local fallback.",
+                capability=Capability.NOTIFY,
+                input_schema={"mission_id": "Mission id", "text": "Notification text"},
+                output="ActionResult",
+                risk=ActionRisk.MEDIUM,
+                requires_confirmation=True,
+                mcp_tool=True,
+            ),
+            ConnectorToolSpec(
+                name="webhook_callback",
+                description="Post an approved callback payload to an external webhook.",
+                capability=Capability.ACTION,
+                input_schema={"callback_url": "Optional callback URL", "payload": "Callback body"},
+                output="ActionResult",
+                risk=ActionRisk.MEDIUM,
+                requires_confirmation=True,
+            ),
+        ],
         reliability_score=0.9,
         auth_required=False,
     )
+
+    def readiness(self, action: str | None = None) -> dict:
+        if action == "webhook_callback" and not os.getenv("AUTOPILOT_CALLBACK_URL"):
+            return {
+                "configured": False,
+                "action_ready": False,
+                "missing": ["AUTOPILOT_CALLBACK_URL"],
+                "mode": "missing_callback",
+                "detail": "Outbound callback URL is not configured.",
+                "action": action,
+            }
+        mode = "slack" if os.getenv("SLACK_WEBHOOK_URL") else "local_fallback"
+        return {
+            "configured": True,
+            "action_ready": True,
+            "missing": [],
+            "mode": mode,
+            "detail": "Slack webhook is configured." if mode == "slack" else "Will write local notification artifacts.",
+            "action": action,
+        }
 
     async def action(self, name: str, payload: dict) -> ActionResult:
         callback_url = payload.get("callback_url") or os.getenv("AUTOPILOT_CALLBACK_URL")
@@ -129,12 +213,43 @@ class LinearConnector(Connector):
     manifest = ConnectorManifest(
         name="linear",
         description="Creates real Linear issues when LINEAR_API_KEY and LINEAR_TEAM_ID are configured.",
+        category="Engineering",
+        auth_mode="api_key",
         capabilities=[Capability.WRITE, Capability.ACTION],
+        scopes=["issues.write"],
+        objects=["issues", "teams"],
         event_types=[],
         safe_actions=["create_issue"],
+        tools=[
+            ConnectorToolSpec(
+                name="linear_create_issue",
+                description="Create a Linear issue with a verified incident brief.",
+                capability=Capability.ACTION,
+                input_schema={"title": "Issue title", "description": "Issue body", "team_id": "Configured team id"},
+                output="ActionResult",
+                risk=ActionRisk.MEDIUM,
+                requires_confirmation=True,
+                mcp_tool=True,
+            ),
+        ],
         reliability_score=0.82,
         auth_required=True,
     )
+
+    def readiness(self, action: str | None = None) -> dict:
+        missing = []
+        if not os.getenv("LINEAR_API_KEY"):
+            missing.append("LINEAR_API_KEY")
+        if not os.getenv("LINEAR_TEAM_ID"):
+            missing.append("LINEAR_TEAM_ID")
+        return {
+            "configured": not missing,
+            "action_ready": not missing,
+            "missing": missing,
+            "mode": "api_key" if not missing else "missing_credentials",
+            "detail": "Linear issue creation is configured." if not missing else "Linear credentials are incomplete.",
+            "action": action,
+        }
 
     async def action(self, name: str, payload: dict) -> ActionResult:
         if os.getenv("PROJECT_MGMT_PROVIDER", "linear").lower() == "jira":

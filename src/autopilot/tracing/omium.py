@@ -22,7 +22,7 @@ from autopilot.storage import Store
 
 log = logging.getLogger("autopilot.tracing")
 
-OMIUM_INGEST_URL = "https://ingest.omium.dev/v1/traces"
+OMIUM_INGEST_URL = "https://api.omium.ai/api/v1/traces"
 
 
 class TraceSink:

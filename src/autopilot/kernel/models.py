@@ -2,6 +2,7 @@
 
 from autopilot.models import (
     ActionResult,
+    AgentRun,
     Evidence,
     Hypothesis,
     Mission,
@@ -13,6 +14,7 @@ from autopilot.models import (
 
 __all__ = [
     "ActionResult",
+    "AgentRun",
     "Evidence",
     "Hypothesis",
     "Mission",

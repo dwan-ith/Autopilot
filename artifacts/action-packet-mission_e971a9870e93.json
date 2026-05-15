@@ -1,0 +1,39 @@
+{
+  "mission_id": "mission_e971a9870e93",
+  "title": "export service: Enterprise customer reports failed exports after today's rollout.",
+  "severity": "high",
+  "confidence": 0.95,
+  "hypotheses": [
+    {
+      "id": "hyp_1ef7f7a61f12",
+      "title": "Rollout or configuration regression",
+      "rationale": "A recent change may be causal.",
+      "confidence": 0.667,
+      "evidence_ids": [
+        "ev_db9ae9e54625",
+        "ev_4a57407c3336",
+        "ev_18cb2e1aa2ef",
+        "ev_ade3defdef5e"
+      ],
+      "status": "open"
+    },
+    {
+      "id": "hyp_61ef464be542",
+      "title": "Customer-impacting operational incident",
+      "rationale": "Affects customer SLA.",
+      "confidence": 0.667,
+      "evidence_ids": [],
+      "status": "open"
+    },
+    {
+      "id": "hyp_fa3ad9ad3eb8",
+      "title": "Follow-up evidence gap investigation",
+      "rationale": "New correlated signals arrived while the mission was running; spawn follow-up investigation over the expanded incident context.",
+      "confidence": 0.667,
+      "evidence_ids": [],
+      "status": "open"
+    }
+  ],
+  "evidence_count": 4,
+  "recommended_action": "Prepare rollback or disable the affected feature flag."
+}

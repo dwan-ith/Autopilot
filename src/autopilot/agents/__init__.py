@@ -1,14 +1,18 @@
-from autopilot.agents.base import AgentResult, AgentStep, Orchestrator, SubAgent, Tool, ToolResult
-from autopilot.agents.specialized import CloudInfraAgent, ProjectMgmtAgent, ScopedAgentResult, SecurityAuditAgent
+from autopilot.agents.base import (
+    AgentResult,
+    AgentStep,
+    Orchestrator,
+    PersistentAgent,
+    SubAgent,
+    Tool,
+    ToolResult,
+)
 
 __all__ = [
     "AgentResult",
     "AgentStep",
-    "CloudInfraAgent",
     "Orchestrator",
-    "ProjectMgmtAgent",
-    "ScopedAgentResult",
-    "SecurityAuditAgent",
+    "PersistentAgent",
     "SubAgent",
     "Tool",
     "ToolResult",

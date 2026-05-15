@@ -1003,8 +1003,17 @@ function ConnectorCard({
                   ? "bg-blue-500/10 text-blue-500 ring-blue-500/20"
                   : "bg-white/5 text-muted-foreground ring-white/10"
           )}>
-            <div className={cn("h-1.5 w-1.5 rounded-full", connected ? "bg-emerald-500 animate-pulse" : readiness?.configured ? "bg-emerald-500" : readiness ? "bg-amber-500" : "bg-current opacity-40")} />
-            {connected || readiness?.configured ? "CONNECTED" : readiness ? "CONFIG REQUIRED" : connector.implemented ? "ADAPTER" : "CATALOG"}
+            <div className={cn("h-1.5 w-1.5 rounded-full",
+              connected ? "bg-emerald-500 animate-pulse"
+              : readiness?.configured ? "bg-emerald-500"
+              : readiness ? "bg-amber-500"
+              : "bg-current opacity-40"
+            )} />
+            {connected || readiness?.configured
+              ? "CONNECTED"
+              : readiness
+                ? "CONFIG REQUIRED"
+                : connector.implemented ? "ADAPTER" : "CATALOG"}
           </div>
           
           {toolCount > 0 && (

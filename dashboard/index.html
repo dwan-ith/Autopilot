@@ -1,0 +1,51 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>AUTOPILOT</title>
+    <link rel="stylesheet" href="/static/styles.css" />
+  </head>
+  <body>
+    <main class="shell">
+      <header class="topbar">
+        <div>
+          <p class="eyebrow">Autonomous Operator Runtime</p>
+          <h1>AUTOPILOT</h1>
+        </div>
+        <div class="actions">
+          <button id="demoBtn" title="Fire an async multi-signal demo">Run Demo</button>
+          <button id="refreshBtn" title="Refresh missions">Refresh</button>
+        </div>
+      </header>
+
+      <section class="grid">
+        <aside class="panel">
+          <div class="panel-head">
+            <h2>Missions</h2>
+            <span id="missionCount">0</span>
+          </div>
+          <div id="missions" class="mission-list"></div>
+        </aside>
+
+        <section class="panel detail">
+          <div class="panel-head">
+            <h2>Execution Graph</h2>
+            <span id="selectedStatus">idle</span>
+          </div>
+          <div id="missionDetail" class="detail-body">
+            <p class="empty">Run the demo or send a webhook to watch AUTOPILOT create a mission graph.</p>
+          </div>
+        </section>
+
+        <aside class="panel">
+          <div class="panel-head">
+            <h2>Connectors</h2>
+          </div>
+          <div id="connectors" class="connector-list"></div>
+        </aside>
+      </section>
+    </main>
+    <script src="/static/app.js"></script>
+  </body>
+</html>

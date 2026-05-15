@@ -213,7 +213,7 @@ class Store:
     def list_steps(self, mission_id: str) -> list[dict[str, Any]]:
         with closing(self.connect()) as conn, conn:
             rows = conn.execute(
-                "select * from steps where mission_id=? order by datetime(created_at), id",
+                "select * from steps where mission_id=? order by created_at, id",
                 (mission_id,),
             ).fetchall()
         return [dict(row) for row in rows]

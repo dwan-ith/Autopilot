@@ -1,0 +1,34 @@
+{
+  "mission_id": "mission_93e6d05f4458",
+  "title": "export service: Experimental export pipeline was enabled for enterprise accounts earlier today.",
+  "severity": "medium",
+  "confidence": 0.96,
+  "hypotheses": [
+    {
+      "id": "hyp_a431d997bfa9",
+      "title": "Rollout or configuration regression",
+      "rationale": "The signal mentions rollout, export, job failures, or sudden changes, so a recent change may be causal.",
+      "confidence": 0.9107999999999999,
+      "evidence_ids": [
+        "ev_30ccaea2dd2f",
+        "ev_5b08f78251f9",
+        "ev_95fb604b635b"
+      ],
+      "status": "open"
+    },
+    {
+      "id": "hyp_11952c34b833",
+      "title": "Customer-impacting operational incident",
+      "rationale": "The signal may affect a customer or SLA and needs an action packet even if root cause is uncertain.",
+      "confidence": 0.9107999999999999,
+      "evidence_ids": [
+        "ev_99e387ff5c0d",
+        "ev_0250181e3bd7",
+        "ev_e2654147132d"
+      ],
+      "status": "open"
+    }
+  ],
+  "evidence_count": 3,
+  "recommended_action": "Prepare rollback or disable the affected feature flag."
+}

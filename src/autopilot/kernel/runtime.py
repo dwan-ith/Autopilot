@@ -8,7 +8,7 @@ from typing import AsyncIterator
 
 from autopilot.connectors.base import ConnectorRegistry
 from autopilot.models import Capability, GraphNodeKind, Mission, MissionGraphNode, MissionStatus, OperatorStep, Signal, StepStatus, utc_now
-from autopilot.operators import OperatorSuite
+from autopilot.operators.core import OperatorSuite
 from autopilot.storage import Store
 from autopilot.tracing import TraceSink
 

@@ -1,5 +1,5 @@
-export type MissionStatus = "queued" | "running" | "waiting" | "complete" | "failed";
-export type StepStatus = "started" | "complete" | "failed";
+export type MissionStatus = "queued" | "running" | "waiting" | "complete" | "failed" | "canceled";
+export type StepStatus = "started" | "complete" | "failed" | "canceled";
 
 export interface Signal {
   id: string;
@@ -53,23 +53,12 @@ export interface Mission {
   actions: ActionResult[];
 }
 
-export interface OperatorStep {
-  id: string;
-  mission_id: string;
-  name: string;
-  role: string;
-  status: StepStatus;
-  input_summary: string;
-  output_summary: string;
-  created_at: string;
-}
-
 export interface Trace {
   id: string;
   name: string;
   status: string;
   created_at: string;
-  payload: any;
+  payload: Record<string, unknown>;
 }
 
 export interface Connector {
@@ -77,4 +66,7 @@ export interface Connector {
   description: string;
   capabilities: string[];
   safe_actions: string[];
+  configured?: boolean;
+  tool_count?: number;
+  auth_required?: boolean;
 }

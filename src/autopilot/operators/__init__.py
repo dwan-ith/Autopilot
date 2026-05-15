@@ -1,1 +1,1 @@
-from autopilot.operators.core import OperatorSuite
+# operators package — import OperatorSuite directly from autopilot.operators.core

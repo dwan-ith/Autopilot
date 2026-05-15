@@ -72,7 +72,31 @@ async def provider() -> dict[str, str]:
 
 @app.get("/api/connectors")
 async def connectors() -> list[dict[str, Any]]:
-    return [manifest.model_dump() for manifest in registry.manifests()]
+    """Return real connector status based on actual env var configuration."""
+    import os
+    result = []
+    for connector in registry._connectors.values():
+        m = connector.manifest
+        # Determine if this connector is actually configured
+        env_checks = {
+            "github": bool(os.getenv("GITHUB_TOKEN")),
+            "linear": bool(os.getenv("LINEAR_API_KEY") and os.getenv("LINEAR_TEAM_ID")),
+            "notification": bool(os.getenv("SLACK_WEBHOOK_URL")),
+            "knowledge": True,  # Always works; Tavily is optional enhancement
+            "artifact": True,   # Always works; no credentials needed
+            "webhook": True,
+            "sentry": True,     # Inbound only; no credentials needed
+        }
+        configured = env_checks.get(m.name, not m.auth_required)
+        # Count available tools for this connector
+        tool_count = len(connector.as_tools()) if hasattr(connector, "as_tools") else 0
+        result.append({
+            **m.model_dump(),
+            "configured": configured,
+            "tool_count": tool_count,
+        })
+    return result
+
 
 @app.get("/api/connector-directory")
 async def connector_directory() -> list[dict[str, Any]]:

@@ -1,0 +1,64 @@
+{
+  "packet_name": "action-packet-mission_ee75a8fa18f7",
+  "mission_id": "mission_ee75a8fa18f7",
+  "title": "checkout: Critical spike in 5xx errors on checkout service",
+  "severity": "critical",
+  "confidence": 0.78,
+  "hypotheses": [
+    {
+      "id": "hyp_e2460638e54a",
+      "title": "Database connection exhaustion",
+      "rationale": "The checkout service might be experiencing a surge in requests, leading to exhaustion of available database connections. This would cause the service to fail to process requests, resulting in 5xx errors.",
+      "confidence": 0.86,
+      "evidence_ids": [
+        "ev_979ec8b29563",
+        "ev_f538558626a1",
+        "ev_1f6ad40a5dd4",
+        "ev_a80c109c58b5",
+        "ev_78f7aebc7045",
+        "ev_8821159405a7",
+        "ev_7257ffeb3db6"
+      ],
+      "status": "open"
+    },
+    {
+      "id": "hyp_3e6da0819646",
+      "title": "Recent code deployment introduced a bug",
+      "rationale": "A recent deployment of new code to the checkout service could have introduced a bug that is causing the service to crash or return errors under certain conditions. This is a common cause of sudden spikes in error rates.",
+      "confidence": 0.74,
+      "evidence_ids": [
+        "ev_1f0b26c09bac",
+        "ev_c4f0f38f4aed",
+        "ev_031dba2d0183",
+        "ev_f52e25155ae4"
+      ],
+      "status": "open"
+    },
+    {
+      "id": "hyp_0cafdb9d180b",
+      "title": "Dependency service outage",
+      "rationale": "The checkout service depends on other backend services (e.g., payment gateway, inventory service). If one of these dependencies is experiencing an outage or performance degradation, it could cause the checkout service to fail.",
+      "confidence": 0.7,
+      "evidence_ids": [
+        "ev_0321177fc658",
+        "ev_df239925e47d",
+        "ev_102c9a3d7004"
+      ],
+      "status": "open"
+    },
+    {
+      "id": "hyp_08f0450e78e2",
+      "title": "Increased traffic volume exceeding capacity",
+      "rationale": "A sudden surge in traffic to the checkout service could be overwhelming its capacity, leading to resource exhaustion and 5xx errors. This could be due to a promotion, marketing campaign, or unexpected event.",
+      "confidence": 0.7,
+      "evidence_ids": [
+        "ev_bc395d22d86c",
+        "ev_ad2b193a7934",
+        "ev_e2c9d5e06bf8"
+      ],
+      "status": "open"
+    }
+  ],
+  "evidence_count": 17,
+  "recommended_action": "Notify the owning team and create a follow-up task."
+}

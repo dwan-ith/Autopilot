@@ -46,6 +46,7 @@ class AgentStep:
     """One step in an agent's reasoning loop."""
     step_number: int
     thought: str
+    raw_llm_response: str | None = None  # full LLM output text for reasoning trace UI
     tool_call: str | None = None
     tool_input: dict[str, Any] | None = None
     tool_result: ToolResult | None = None
@@ -118,12 +119,13 @@ Available tools:
 
 Respond with EXACTLY one JSON object:
 
-To call a tool:
-{{"action": "tool", "tool": "tool_name", "input": {{"param": "value"}}}}
+To call a tool (include your reasoning in 'thought'):
+{{"action": "tool", "thought": "I should search X because Y", "tool": "tool_name", "input": {{"param": "value"}}}}
 
 To return your final answer:
-{{"action": "answer", "result": {{...your structured result...}}}}
+{{"action": "answer", "thought": "Based on the evidence I found...", "result": {{...your structured result...}}}}
 
+ALWAYS include the 'thought' field explaining your reasoning before the action.
 Do NOT include any text outside the JSON object.
 """
 
@@ -201,7 +203,11 @@ class SubAgent:
 
             parsed = parse_json(raw)
             if not isinstance(parsed, dict):
-                steps.append(AgentStep(step_number=step_num, thought=raw or ""))
+                steps.append(AgentStep(
+                    step_number=step_num,
+                    thought=f"[Invalid JSON on step {step_num}] {(raw or '')[:400]}",
+                    raw_llm_response=raw,
+                ))
                 ctx += "\n\nYour last response was not valid JSON. Respond with EXACTLY one JSON object."
                 continue
 
@@ -209,7 +215,11 @@ class SubAgent:
 
             if action == "answer":
                 result = parsed.get("result", parsed)
-                steps.append(AgentStep(step_number=step_num, thought=f"Final answer: {json.dumps(result)[:200]}"))
+                steps.append(AgentStep(
+                    step_number=step_num,
+                    thought=f"Final answer: {json.dumps(result)[:300]}",
+                    raw_llm_response=raw,
+                ))
                 return AgentResult(
                     agent_id=self.id, agent_role=self.role, task=task,
                     answer=result if isinstance(result, dict) else {"result": result},
@@ -224,7 +234,11 @@ class SubAgent:
                 tool_input = parsed.get("input", {})
 
                 if tool_name not in self.tools:
-                    steps.append(AgentStep(step_number=step_num, thought=f"Attempted unknown tool: {tool_name}"))
+                    steps.append(AgentStep(
+                        step_number=step_num,
+                        thought=f"Attempted unknown tool '{tool_name}'. Available: {list(self.tools.keys())}",
+                        raw_llm_response=raw,
+                    ))
                     ctx += f"\n\nTool '{tool_name}' does not exist. Available: {list(self.tools.keys())}"
                     continue
 
@@ -232,9 +246,19 @@ class SubAgent:
                 tool_result = await tool.execute(**tool_input)
                 tool_calls += 1
 
+                # Extract any reasoning text the LLM provided before the tool call
+                # LLMs often include a 'thought' or 'reasoning' key alongside 'action'
+                llm_reasoning = (
+                    parsed.get("thought")
+                    or parsed.get("reasoning")
+                    or parsed.get("rationale")
+                    or f"Calling {tool_name} with {json.dumps(tool_input)[:200]}"
+                )
+
                 step = AgentStep(
                     step_number=step_num,
-                    thought=f"Called {tool_name}",
+                    thought=str(llm_reasoning)[:600],
+                    raw_llm_response=raw,
                     tool_call=tool_name,
                     tool_input=tool_input,
                     tool_result=tool_result,
@@ -255,7 +279,11 @@ class SubAgent:
                 ctx += f"\n\nTool '{tool_name}' returned:\n{result_str}\n\nReason about this and decide next step."
                 continue
 
-            steps.append(AgentStep(step_number=step_num, thought=f"Unknown action: {action}"))
+            steps.append(AgentStep(
+                step_number=step_num,
+                thought=f"Unknown action '{action}' returned. Must be 'tool' or 'answer'.",
+                raw_llm_response=raw,
+            ))
             ctx += "\n\nRespond with action 'tool' or 'answer' only."
 
         return AgentResult(

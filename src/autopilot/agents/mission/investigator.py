@@ -127,6 +127,19 @@ class InvestigatorAgent:
                 "step_count": len(agent_result.steps),
                 "hypothesis_supported": agent_result.answer.get("hypothesis_supported", False)
                     if isinstance(agent_result.answer, dict) else False,
+                "steps": [
+                    {
+                        "step_number": s.step_number,
+                        "thought": s.thought,
+                        "tool_call": s.tool_call,
+                        "tool_input": s.tool_input,
+                        "tool_result": {
+                            "success": s.tool_result.success,
+                            "output": str(s.tool_result.output)[:500] if s.tool_result.output else None,
+                            "error": s.tool_result.error
+                        } if s.tool_result else None
+                    } for s in agent_result.steps
+                ]
             },
         )
         mission.agent_runs.append(run)

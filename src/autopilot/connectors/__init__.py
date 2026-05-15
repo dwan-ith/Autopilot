@@ -1,9 +1,10 @@
-from autopilot.connectors.actions import ArtifactConnector, CloudInfraConnector, LinearConnector, NotificationConnector
+from autopilot.connectors.actions import ArtifactConnector, CloudInfraConnector, NotificationConnector
 from autopilot.connectors.base import ConnectorRegistry
 from autopilot.connectors.github_connector import GitHubConnector
 from autopilot.connectors.gmail import GmailConnector
 from autopilot.connectors.google_drive import GoogleDriveConnector
 from autopilot.connectors.knowledge import KnowledgeConnector
+from autopilot.connectors.linear import LinearConnector  # canonical full GraphQL implementation
 from autopilot.connectors.notion import NotionConnector
 from autopilot.connectors.pagerduty import PagerDutyConnector
 from autopilot.connectors.security import SecurityAuditConnector

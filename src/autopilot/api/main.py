@@ -1,10 +1,13 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
+import hmac
 import json
 import logging
 import os
 import secrets
+import time
 from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Any
@@ -18,7 +21,8 @@ from autopilot.connectors import default_registry
 from autopilot.connectors.service import ConnectorDirectory
 from autopilot.connectors.github_connector import GitHubConnector
 from autopilot.connectors.knowledge import KnowledgeConnector
-from autopilot.connectors.actions import ArtifactConnector, LinearConnector, NotificationConnector
+from autopilot.connectors.actions import ArtifactConnector, NotificationConnector
+from autopilot.connectors.linear import LinearConnector
 from autopilot.connectors.gmail import GmailConnector
 from autopilot.connectors.google_drive import GoogleDriveConnector
 from autopilot.connectors.notion import NotionConnector
@@ -86,6 +90,72 @@ def require_write_access(request: Request) -> None:
         supplied = authorization[7:].strip()
     if not supplied or not secrets.compare_digest(supplied, expected):
         raise HTTPException(status_code=401, detail="AUTOPILOT_API_KEY is required for write operations")
+
+
+# ---------------------------------------------------------------------------
+# HMAC webhook signature verification
+# ---------------------------------------------------------------------------
+
+def _verify_webhook_signature(body: bytes, request: Request) -> None:
+    """Verify inbound webhook HMAC signature if AUTOPILOT_WEBHOOK_SECRET is set.
+
+    Supports:
+      - X-Hub-Signature-256   (GitHub)
+      - X-Sentry-Hook-Signature (Sentry)
+      - X-Autopilot-Signature (generic)
+    """
+    secret = os.getenv("AUTOPILOT_WEBHOOK_SECRET", "").strip()
+    if not secret:
+        return  # No secret configured — skip verification
+
+    sig_header = (
+        request.headers.get("x-hub-signature-256", "")
+        or request.headers.get("x-sentry-hook-signature", "")
+        or request.headers.get("x-autopilot-signature", "")
+    )
+    if not sig_header:
+        raise HTTPException(status_code=401, detail="Missing webhook signature header")
+
+    # Strip prefix (e.g. "sha256=<digest>")
+    if "=" in sig_header:
+        sig_hex = sig_header.split("=", 1)[1]
+    else:
+        sig_hex = sig_header
+
+    expected_digest = hmac.new(secret.encode(), body, hashlib.sha256).hexdigest()
+    if not secrets.compare_digest(expected_digest, sig_hex.lower()):
+        raise HTTPException(status_code=401, detail="Webhook signature mismatch")
+
+
+# ---------------------------------------------------------------------------
+# Token-bucket rate limiter for /api/signals
+# ---------------------------------------------------------------------------
+
+class _TokenBucket:
+    """Simple in-process token-bucket rate limiter."""
+
+    def __init__(self, rate: float, capacity: float):
+        self._rate = rate          # tokens per second
+        self._capacity = capacity  # max burst
+        self._tokens = capacity
+        self._last = time.monotonic()
+        self._lock = asyncio.Lock()
+
+    async def consume(self) -> bool:
+        async with self._lock:
+            now = time.monotonic()
+            elapsed = now - self._last
+            self._last = now
+            self._tokens = min(self._capacity, self._tokens + elapsed * self._rate)
+            if self._tokens >= 1:
+                self._tokens -= 1
+                return True
+            return False
+
+
+# 30 req/min default; override with AUTOPILOT_SIGNAL_RATE_LIMIT=N (per minute)
+_signal_rate = int(os.getenv("AUTOPILOT_SIGNAL_RATE_LIMIT", "30"))
+_signal_bucket = _TokenBucket(rate=_signal_rate / 60.0, capacity=float(_signal_rate))
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
@@ -203,8 +273,13 @@ async def disconnect_connector(connector_id: str, request: Request) -> dict[str,
 
 @app.post("/webhooks/{connector_name}")
 async def webhook(connector_name: str, request: Request) -> dict[str, Any]:
+    body = await request.body()
+    _verify_webhook_signature(body, request)
     require_write_access(request)
-    payload = await request.json()
+    try:
+        payload = json.loads(body)
+    except Exception:
+        raise HTTPException(status_code=400, detail="Invalid JSON body")
     connector = registry.get(connector_name) if registry.has_name(connector_name) else registry.get("webhook")
     signal = await connector.normalize_event(payload)
     signal.source = connector_name
@@ -215,6 +290,12 @@ async def webhook(connector_name: str, request: Request) -> dict[str, Any]:
 @app.post("/api/signals")
 async def create_signal(signal_request: WebhookSignalRequest, request: Request) -> dict[str, Any]:
     require_write_access(request)
+    if not await _signal_bucket.consume():
+        raise HTTPException(
+            status_code=429,
+            detail=f"Rate limit exceeded: max {_signal_rate} signals/minute. Set AUTOPILOT_SIGNAL_RATE_LIMIT to change.",
+            headers={"Retry-After": "60"},
+        )
     signal = Signal(
         source=signal_request.source,
         type=signal_request.type,
@@ -493,17 +574,19 @@ async def webhook_pagerduty(request: Request) -> dict[str, Any]:
     payload = await request.json()
     connector = PagerDutyConnector()
     signal = await connector.normalize_event(payload)
-    mission = await kernel.ingest(signal)
+    mission = await runtime.ingest(signal)
     return {"status": "accepted", "mission_id": mission.id, "signal_id": signal.id}
 
 
 @app.post("/webhooks/jira")
 async def webhook_jira(request: Request) -> dict[str, Any]:
-    """Ingest Jira issue webhooks."""
+    """Ingest Jira issue webhooks (normalized via generic WebhookConnector)."""
     payload = await request.json()
-    connector = JiraConnector()
+    connector = WebhookConnector()
     signal = await connector.normalize_event(payload)
-    mission = await kernel.ingest(signal)
+    signal.source = "jira"
+    signal.type = payload.get("webhookEvent", "jira.event")
+    mission = await runtime.ingest(signal)
     return {"status": "accepted", "mission_id": mission.id, "signal_id": signal.id}
 
 
@@ -513,7 +596,7 @@ async def webhook_weather(request: Request) -> dict[str, Any]:
     payload = await request.json()
     connector = WeatherConnector()
     signal = await connector.normalize_event(payload)
-    mission = await kernel.ingest(signal)
+    mission = await runtime.ingest(signal)
     return {"status": "accepted", "mission_id": mission.id, "signal_id": signal.id}
 
 

@@ -144,7 +144,7 @@ async def reason(
     model: str | None = None,
     temperature: float = 0.35,
     json_mode: bool = False,
-    max_tokens: int = 2048,
+    max_tokens: int = 1024,
 ) -> str | None:
     """Send a chat-completion request using the best slot for the given role.
 

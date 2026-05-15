@@ -8,6 +8,8 @@ import {
   BarChart3,
   Bot,
   CheckCircle2,
+  ChevronDown,
+  ChevronUp,
   Command,
   Database,
   FileText,
@@ -41,6 +43,37 @@ import {
 const API_BASE = process.env.NEXT_PUBLIC_API_URL || "";
 
 type View = "dashboard" | "connectors" | "approvals" | "traces" | "analytics";
+
+function BackgroundGrid() {
+  return (
+    <div className="fixed inset-0 -z-10 overflow-hidden pointer-events-none">
+      <div className="absolute inset-0 bg-[#030303]" />
+      <div 
+        className="absolute inset-0 opacity-[0.15]"
+        style={{
+          backgroundImage: `radial-gradient(circle at 2px 2px, rgba(255,255,255,0.15) 1px, transparent 0)`,
+          backgroundSize: '32px 32px'
+        }}
+      />
+      <motion.div 
+        animate={{ 
+          scale: [1, 1.2, 1],
+          opacity: [0.3, 0.5, 0.3],
+        }}
+        transition={{ duration: 10, repeat: Infinity, ease: "linear" }}
+        className="absolute -top-[20%] -left-[10%] w-[70%] h-[70%] rounded-full bg-blue-500/10 blur-[120px]" 
+      />
+      <motion.div 
+        animate={{ 
+          scale: [1.2, 1, 1.2],
+          opacity: [0.2, 0.4, 0.2],
+        }}
+        transition={{ duration: 15, repeat: Infinity, ease: "linear" }}
+        className="absolute -bottom-[20%] -right-[10%] w-[60%] h-[60%] rounded-full bg-purple-500/10 blur-[120px]" 
+      />
+    </div>
+  );
+}
 
 export default function Dashboard() {
   const {
@@ -83,9 +116,10 @@ export default function Dashboard() {
   };
 
   return (
-    <div className="flex h-screen bg-background text-[13px] font-medium leading-none text-foreground selection:bg-primary/10">
+    <div className="flex h-screen bg-transparent text-[13px] font-medium leading-none text-foreground selection:bg-primary/10">
+      <BackgroundGrid />
       {/* Sidebar Navigation */}
-      <aside className="flex w-64 flex-col border-r border-border/50 bg-card/30 backdrop-blur-xl">
+      <aside className="flex w-64 flex-col border-r border-border/20 bg-black/40 backdrop-blur-3xl shadow-2xl">
         <div className="flex h-14 items-center gap-2.5 border-b border-border/50 px-5">
           <div className="flex h-6 w-6 items-center justify-center rounded-md bg-foreground text-background">
             <Command className="h-3.5 w-3.5" />
@@ -445,74 +479,119 @@ function SignalModal({ isOpen, onClose, onSubmit }: { isOpen: boolean; onClose: 
   const [entities, setEntities] = useState("");
   const [urgency, setUrgency] = useState("high");
 
+  const presets = [
+    { label: "Sentry Spike", type: "monitoring_error", summary: "Critical spike in 5xx errors on checkout service", entities: "checkout, backend", urgency: "critical" },
+    { label: "Escalation", type: "support_escalation", summary: "Enterprise customer 'Acme Corp' reporting data loss", entities: "acme-corp, storage", urgency: "high" },
+    { label: "Security", type: "security_alert", summary: "Unauthorized login attempts detected on admin panel", entities: "auth-service, admin", urgency: "critical" },
+  ];
+
+  const applyPreset = (p: typeof presets[0]) => {
+    setType(p.type);
+    setSummary(p.summary);
+    setEntities(p.entities);
+    setUrgency(p.urgency);
+  };
+
   if (!isOpen) return null;
 
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center bg-background/80 backdrop-blur-sm p-4 text-sm font-medium leading-none">
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 backdrop-blur-md p-4">
       <motion.div
-        initial={{ opacity: 0, scale: 0.95 }}
-        animate={{ opacity: 1, scale: 1 }}
-        className="w-full max-w-md rounded-2xl border border-border bg-card p-6 shadow-2xl"
+        initial={{ opacity: 0, scale: 0.9, y: 20 }}
+        animate={{ opacity: 1, scale: 1, y: 0 }}
+        className="w-full max-w-xl rounded-3xl border border-white/10 bg-[#0A0A0A] p-8 shadow-2xl relative overflow-hidden"
       >
-        <div className="mb-6 flex items-center justify-between">
-          <h3 className="text-lg font-bold">New Manual Signal</h3>
-          <button onClick={onClose} className="rounded-full p-1 hover:bg-white/10">
-            <X className="h-4 w-4" />
+        {/* Glow effect */}
+        <div className="absolute -top-24 -right-24 h-48 w-48 bg-primary/10 blur-[80px] rounded-full" />
+
+        <div className="mb-8 flex items-center justify-between relative">
+          <div>
+            <h3 className="text-xl font-bold tracking-tight">Ingest Manual Signal</h3>
+            <p className="text-[12px] text-muted-foreground mt-1">Simulate an external event to trigger an autonomous mission.</p>
+          </div>
+          <button onClick={onClose} className="rounded-full h-8 w-8 flex items-center justify-center hover:bg-white/5 text-muted-foreground transition-colors">
+            <X className="h-5 w-5" />
           </button>
         </div>
 
-        <div className="space-y-4">
-          <div className="space-y-1.5">
-            <label className="text-[11px] font-bold uppercase tracking-wider text-muted-foreground">Signal Type</label>
-            <select
-              value={type}
-              onChange={(e) => setType(e.target.value)}
-              className="w-full rounded-lg border border-border bg-background px-3 py-2 outline-none focus:ring-1 focus:ring-primary appearance-none"
-            >
-              <option value="support_escalation">Support Escalation</option>
-              <option value="monitoring_error">Monitoring Error</option>
-              <option value="security_alert">Security Alert</option>
-              <option value="code_review">Code Review Request</option>
-              <option value="custom">Custom Signal</option>
-            </select>
-          </div>
-
-          <div className="space-y-1.5">
-            <label className="text-[11px] font-bold uppercase tracking-wider text-muted-foreground">Urgency</label>
+        <div className="space-y-6 relative">
+          {/* Presets */}
+          <div className="space-y-2">
+            <label className="text-[10px] font-black uppercase tracking-[0.2em] text-muted-foreground/40">Presets</label>
             <div className="flex gap-2">
-              {["low", "medium", "high", "critical"].map((u) => (
+              {presets.map((p) => (
                 <button
-                  key={u}
-                  onClick={() => setUrgency(u)}
-                  className={cn(
-                    "flex-1 rounded-md border py-1.5 text-[11px] font-bold uppercase transition-all",
-                    urgency === u ? "border-primary bg-primary/10 text-primary" : "border-border hover:bg-white/5"
-                  )}
+                  key={p.label}
+                  onClick={() => applyPreset(p)}
+                  className="flex-1 rounded-xl border border-white/5 bg-white/[0.02] py-2.5 text-[11px] font-bold hover:bg-white/[0.05] hover:border-white/10 transition-all active:scale-95"
                 >
-                  {u}
+                  {p.label}
                 </button>
               ))}
             </div>
           </div>
 
-          <div className="space-y-1.5">
-            <label className="text-[11px] font-bold uppercase tracking-wider text-muted-foreground">Summary</label>
+          <div className="grid grid-cols-2 gap-4">
+             <div className="space-y-2">
+              <label className="text-[10px] font-black uppercase tracking-[0.2em] text-muted-foreground/40">Type</label>
+              <div className="relative">
+                <select
+                  value={type}
+                  onChange={(e) => setType(e.target.value)}
+                  className="w-full rounded-xl border border-white/5 bg-black px-4 py-2.5 text-[12px] outline-none focus:ring-1 focus:ring-primary/50 appearance-none font-bold"
+                >
+                  <option value="support_escalation">Support Escalation</option>
+                  <option value="monitoring_error">Monitoring Error</option>
+                  <option value="security_alert">Security Alert</option>
+                  <option value="code_review">Code Review</option>
+                  <option value="custom">Custom Signal</option>
+                </select>
+                <ChevronDown className="absolute right-4 top-1/2 -translate-y-1/2 h-3.5 w-3.5 text-muted-foreground/40 pointer-events-none" />
+              </div>
+            </div>
+            <div className="space-y-2">
+              <label className="text-[10px] font-black uppercase tracking-[0.2em] text-muted-foreground/40">Urgency</label>
+              <div className="flex gap-1 bg-black p-1 rounded-xl border border-white/5">
+                {["low", "med", "high", "crit"].map((u) => {
+                  const val = u === "med" ? "medium" : u === "crit" ? "critical" : u;
+                  return (
+                    <button
+                      key={u}
+                      onClick={() => setUrgency(val)}
+                      className={cn(
+                        "flex-1 rounded-lg py-1.5 text-[10px] font-black uppercase transition-all",
+                        urgency === val ? "bg-white/10 text-white shadow-sm" : "text-muted-foreground/40 hover:text-muted-foreground"
+                      )}
+                    >
+                      {u}
+                    </button>
+                  );
+                })}
+              </div>
+            </div>
+          </div>
+
+          <div className="space-y-2">
+            <label className="text-[10px] font-black uppercase tracking-[0.2em] text-muted-foreground/40">Summary</label>
             <textarea
               value={summary}
               onChange={(e) => setSummary(e.target.value)}
-              placeholder="Describe the event..."
-              className="h-24 w-full resize-none rounded-lg border border-border bg-background px-3 py-2 text-[13px] outline-none focus:ring-1 focus:ring-primary leading-relaxed"
+              placeholder="What happened? E.g. 'Customer reported issue with billing...'"
+              className="h-24 w-full resize-none rounded-2xl border border-white/5 bg-black px-4 py-3 text-[13px] outline-none focus:ring-1 focus:ring-primary/50 leading-relaxed placeholder:text-muted-foreground/20 font-medium"
             />
           </div>
 
-          <div className="space-y-1.5">
-            <label className="text-[11px] font-bold uppercase tracking-wider text-muted-foreground">Entities</label>
-            <input
-              value={entities}
-              onChange={(e) => setEntities(e.target.value)}
-              placeholder="export service, checkout, rollout"
-              className="w-full rounded-lg border border-border bg-background px-3 py-2 text-[13px] outline-none focus:ring-1 focus:ring-primary"
-            />
+          <div className="space-y-2">
+            <label className="text-[10px] font-black uppercase tracking-[0.2em] text-muted-foreground/40">Involved Entities (Comma separated)</label>
+            <div className="relative">
+               <input
+                value={entities}
+                onChange={(e) => setEntities(e.target.value)}
+                placeholder="checkout-service, acme-corp, v1.2.0"
+                className="w-full rounded-xl border border-white/5 bg-black px-4 py-3 text-[13px] outline-none focus:ring-1 focus:ring-primary/50 font-mono"
+              />
+              <Layers className="absolute right-4 top-1/2 -translate-y-1/2 h-4 w-4 text-muted-foreground/20" />
+            </div>
           </div>
 
           <button
@@ -521,17 +600,14 @@ function SignalModal({ isOpen, onClose, onSubmit }: { isOpen: boolean; onClose: 
               summary,
               urgency,
               source: "manual_ui",
-              entities: entities
-                .split(",")
-                .map((entity) => entity.trim())
-                .filter(Boolean),
+              entities: entities.split(",").map(e => e.trim()).filter(Boolean),
               payload: {},
             })}
             disabled={!summary}
-            className="flex w-full items-center justify-center gap-2 rounded-lg bg-foreground py-2.5 text-[13px] font-bold text-background transition-all hover:opacity-90 disabled:opacity-50"
+            className="group relative flex w-full items-center justify-center gap-2 overflow-hidden rounded-2xl bg-white px-6 py-4 text-[14px] font-black uppercase tracking-widest text-black transition-all hover:scale-[1.01] active:scale-[0.98] disabled:opacity-30 disabled:grayscale"
           >
-            <Zap className="h-4 w-4" />
-            Ingest Signal
+            <Zap className="h-4 w-4 fill-current" />
+            Ingest Into Runtime
           </button>
         </div>
       </motion.div>
@@ -746,8 +822,11 @@ function DetailStat({ icon: Icon, label, value }: { icon: ElementType; label: st
 }
 
 function AgentCard({ run }: { run: AgentRun }) {
+  const [showTrace, setShowTrace] = useState(false);
+  const steps = run.metadata.steps as any[];
+
   return (
-    <div className="rounded-xl border border-border/40 bg-white/[0.01] p-4 space-y-4">
+    <div className="rounded-xl border border-border/40 bg-white/[0.01] p-4 space-y-4 shadow-sm hover:border-primary/20 transition-all">
       <div className="flex items-start justify-between">
         <div className="space-y-1">
           <div className="flex items-center gap-2">
@@ -766,14 +845,72 @@ function AgentCard({ run }: { run: AgentRun }) {
       
       <p className="text-[12px] leading-relaxed text-muted-foreground/60">{run.output_summary}</p>
 
-      <div className="flex items-center gap-4 text-[11px]">
-        <span className="flex items-center gap-1.5 text-muted-foreground/40 font-bold">
-          <Wrench className="h-3 w-3" /> {run.tool_calls} CALLS
-        </span>
-        <span className="flex items-center gap-1.5 text-muted-foreground/40 font-bold">
-          <ShieldCheck className="h-3 w-3" /> {Math.round(run.confidence * 100)}% CONF
-        </span>
+      <div className="flex items-center justify-between">
+        <div className="flex items-center gap-4 text-[11px]">
+          <span className="flex items-center gap-1.5 text-muted-foreground/40 font-bold">
+            <Wrench className="h-3 w-3" /> {run.tool_calls} CALLS
+          </span>
+          <span className="flex items-center gap-1.5 text-muted-foreground/40 font-bold">
+            <ShieldCheck className="h-3 w-3" /> {Math.round(run.confidence * 100)}% CONF
+          </span>
+        </div>
+
+        {steps && steps.length > 0 && (
+          <button 
+            onClick={() => setShowTrace(!showTrace)}
+            className="flex items-center gap-1 text-[10px] font-bold uppercase tracking-widest text-primary/60 hover:text-primary transition-colors"
+          >
+            {showTrace ? <ChevronUp className="h-3 w-3" /> : <ChevronDown className="h-3 w-3" />}
+            {showTrace ? "Hide Trace" : "View Trace"}
+          </button>
+        )}
       </div>
+
+      <AnimatePresence>
+        {showTrace && steps && (
+          <motion.div
+            initial={{ height: 0, opacity: 0 }}
+            animate={{ height: "auto", opacity: 1 }}
+            exit={{ height: 0, opacity: 0 }}
+            className="overflow-hidden"
+          >
+            <div className="mt-2 space-y-4 pl-3 border-l-2 border-primary/10 py-1">
+              {steps.map((step, idx) => (
+                <div key={idx} className="space-y-2">
+                  <div className="flex items-center gap-2">
+                    <span className="text-[9px] font-black uppercase tracking-widest text-muted-foreground/30">Step {step.step_number}</span>
+                    <div className="h-px flex-1 bg-border/10" />
+                  </div>
+                  <p className="text-[11px] text-muted-foreground/80 italic leading-relaxed">
+                    {step.thought}
+                  </p>
+                  {step.tool_call && (
+                    <div className="rounded-lg bg-black/40 p-2.5 border border-white/5 space-y-2">
+                      <div className="flex items-center justify-between">
+                        <div className="flex items-center gap-2 text-[10px] font-bold text-amber-500/80">
+                          <Wrench className="h-3 w-3" />
+                          {step.tool_call}
+                        </div>
+                        <span className={cn(
+                          "text-[8px] font-black uppercase px-1 rounded",
+                          step.tool_result?.success ? "bg-emerald-500/10 text-emerald-500/60" : "bg-red-500/10 text-red-500/60"
+                        )}>
+                          {step.tool_result?.success ? "SUCCESS" : "FAILED"}
+                        </span>
+                      </div>
+                      {step.tool_result?.output && (
+                        <pre className="text-[9px] text-muted-foreground/40 font-mono bg-black/20 p-1.5 rounded overflow-x-auto whitespace-pre-wrap max-h-24">
+                          {step.tool_result.output}
+                        </pre>
+                      )}
+                    </div>
+                  )}
+                </div>
+              ))}
+            </div>
+          </motion.div>
+        )}
+      </AnimatePresence>
 
       <div className="flex flex-wrap gap-1.5">
         {run.tools.map((t, i) => (
@@ -805,6 +942,7 @@ function ConnectorCard({
     | undefined;
   const oauthUrl = readiness?.auth_url as string | undefined;
   const isOAuthConnector = connector.auth_mode === "oauth" || !!oauthUrl;
+  const toolCount = runtimeConnector?.tool_count || connector.tools?.length || 0;
 
   const handleToggle = async () => {
     if (busy) return;
@@ -822,46 +960,69 @@ function ConnectorCard({
 
   return (
     <div className={cn(
-      "group relative flex flex-col rounded-2xl border border-border/40 bg-white/[0.01] p-5 transition-all hover:border-primary/40 hover:bg-white/[0.03] overflow-hidden",
+      "group relative flex flex-col rounded-2xl border border-border/40 bg-white/[0.01] p-6 transition-all hover:border-primary/40 hover:bg-white/[0.03] overflow-hidden shadow-sm hover:shadow-primary/5",
       !connector.implemented && "opacity-75"
     )}>
-      <div className="mb-6 flex items-start justify-between">
-        <div className="flex h-10 w-10 items-center justify-center rounded-xl bg-white/[0.03] border border-white/5 group-hover:scale-110 transition-transform">
-          <Database className="h-5 w-5 text-muted-foreground group-hover:text-primary transition-colors" />
+      {/* Background Glow */}
+      <div className={cn(
+        "absolute -right-4 -top-4 h-24 w-24 rounded-full blur-[40px] opacity-0 group-hover:opacity-100 transition-opacity duration-700",
+        connected ? "bg-emerald-500/10" : "bg-primary/10"
+      )} />
+
+      <div className="mb-6 flex items-start justify-between relative">
+        <div className="flex h-12 w-12 items-center justify-center rounded-2xl bg-white/[0.03] border border-white/5 group-hover:scale-110 transition-all duration-500 group-hover:border-primary/20 shadow-inner">
+          <Database className={cn(
+            "h-6 w-6 transition-colors duration-500",
+            connected ? "text-emerald-500" : "text-muted-foreground group-hover:text-primary"
+          )} />
+          {connected && (
+            <div className="absolute inset-0 rounded-2xl border-2 border-emerald-500/20 animate-pulse" />
+          )}
         </div>
-        <div className={cn(
-          "flex items-center gap-1.5 rounded-full px-2.5 py-1 text-[10px] font-black uppercase tracking-tighter ring-1 ring-inset",
-          connected
-            ? "bg-emerald-500/5 text-emerald-500 ring-emerald-500/20"
-            : readiness?.configured
-              ? "bg-emerald-500/5 text-emerald-500 ring-emerald-500/20"
-              : connector.implemented
-                ? "bg-blue-500/5 text-blue-500 ring-blue-500/20"
-                : "bg-white/5 text-muted-foreground ring-white/10"
-        )}>
-          {connected || readiness?.configured ? "CONNECTED" : connector.implemented ? "ADAPTER" : "CATALOG"}
+        
+        <div className="flex flex-col items-end gap-2">
+          <div className={cn(
+            "flex items-center gap-1.5 rounded-full px-3 py-1 text-[10px] font-black uppercase tracking-tighter ring-1 ring-inset shadow-sm",
+            connected
+              ? "bg-emerald-500/10 text-emerald-500 ring-emerald-500/20"
+              : readiness?.configured
+                ? "bg-emerald-500/10 text-emerald-500 ring-emerald-500/20"
+                : connector.implemented
+                  ? "bg-blue-500/10 text-blue-500 ring-blue-500/20"
+                  : "bg-white/5 text-muted-foreground ring-white/10"
+          )}>
+            <div className={cn("h-1.5 w-1.5 rounded-full", connected ? "bg-emerald-500 animate-pulse" : "bg-current opacity-40")} />
+            {connected || readiness?.configured ? "CONNECTED" : connector.implemented ? "ADAPTER" : "CATALOG"}
+          </div>
+          
+          {toolCount > 0 && (
+            <div className="flex items-center gap-1 text-[9px] font-black text-muted-foreground/30 uppercase tracking-widest">
+              <Wrench className="h-3 w-3" />
+              {toolCount} Tools
+            </div>
+          )}
         </div>
       </div>
 
-      <div className="space-y-1 mb-4 flex-1">
-        <h3 className="text-[15px] font-bold group-hover:text-primary transition-colors">{connector.name}</h3>
-        <p className="text-[12px] text-muted-foreground leading-relaxed line-clamp-2">{connector.description}</p>
+      <div className="space-y-1.5 mb-6 flex-1 relative">
+        <h3 className="text-[16px] font-bold group-hover:text-primary transition-colors">{connector.name}</h3>
+        <p className="text-[12px] text-muted-foreground leading-relaxed line-clamp-2 opacity-70 group-hover:opacity-100 transition-opacity">{connector.description}</p>
       </div>
 
-      <div className="space-y-4">
+      <div className="space-y-5 relative">
         {readiness && (
-          <div className="rounded-md border border-white/5 bg-black/20 p-2 text-[11px] leading-relaxed text-muted-foreground">
-            <div className="flex items-center justify-between gap-2">
-              <span>{readiness.detail as string}</span>
+          <div className="rounded-xl border border-white/5 bg-black/40 p-3 text-[11px] leading-relaxed text-muted-foreground/80 shadow-inner">
+            <div className="flex items-center justify-between gap-2 mb-1">
+              <span className="truncate">{readiness.detail as string}</span>
               <span className={cn(
-                "rounded border px-1.5 py-0.5 text-[9px] font-black uppercase",
-                readiness.configured ? "border-emerald-500/20 text-emerald-500" : "border-amber-500/20 text-amber-500"
+                "flex-shrink-0 rounded-md border px-1.5 py-0.5 text-[9px] font-black uppercase tracking-wider",
+                readiness.configured ? "border-emerald-500/20 text-emerald-500 bg-emerald-500/5" : "border-amber-500/20 text-amber-500 bg-amber-500/5"
               )}>
                 {readiness.mode as string}
               </span>
             </div>
             {(readiness.missing as string[] | undefined)?.length ? (
-              <div className="mt-1 font-mono text-[10px] text-amber-500/80">
+              <div className="mt-2 font-mono text-[10px] text-amber-500/80 bg-amber-500/5 rounded p-1.5 border border-amber-500/10">
                 Missing: {(readiness.missing as string[]).join(", ")}
               </div>
             ) : null}
@@ -1017,16 +1178,32 @@ function MissionDAG({ nodes }: { nodes: MissionGraphNode[] }) {
             {layer.map((node, i) => {
               const colors = NODE_KIND_COLORS[node.kind] || DEFAULT_COLOR;
               const isComplete = node.status === "complete";
+              const isRunning = node.status === "started";
               return (
                 <motion.div
                   key={node.id}
+                  layout
                   initial={{ opacity: 0, y: 16, scale: 0.95 }}
-                  animate={{ opacity: 1, y: 0, scale: 1 }}
-                  transition={{ delay: depth * 0.08 + i * 0.04, duration: 0.35, ease: "easeOut" }}
+                  animate={{ 
+                    opacity: 1, 
+                    y: 0, 
+                    scale: 1,
+                    borderColor: isRunning ? "rgba(245, 158, 11, 0.4)" : undefined,
+                    boxShadow: isRunning ? "0 0 15px rgba(245, 158, 11, 0.15)" : undefined,
+                  }}
+                  exit={{ opacity: 0, scale: 0.9 }}
+                  transition={{ 
+                    layout: { type: "spring", stiffness: 300, damping: 30 },
+                    opacity: { duration: 0.2 },
+                    y: { duration: 0.2 },
+                    borderColor: { duration: 0.5, repeat: isRunning ? Infinity : 0, repeatType: "reverse" },
+                    boxShadow: { duration: 0.8, repeat: isRunning ? Infinity : 0, repeatType: "reverse" }
+                  }}
                   className={cn(
                     "group relative rounded-xl border p-4 transition-all hover:scale-[1.02]",
                     colors.bg, colors.border,
-                    isComplete && colors.glow
+                    isComplete && colors.glow,
+                    isRunning && "ring-1 ring-amber-500/30"
                   )}
                 >
                   {/* Status dot */}

@@ -19,6 +19,12 @@ from autopilot.connectors.service import ConnectorDirectory
 from autopilot.connectors.github_connector import GitHubConnector
 from autopilot.connectors.knowledge import KnowledgeConnector
 from autopilot.connectors.actions import ArtifactConnector, LinearConnector, NotificationConnector
+from autopilot.connectors.gmail import GmailConnector
+from autopilot.connectors.google_drive import GoogleDriveConnector
+from autopilot.connectors.notion import NotionConnector
+from autopilot.connectors.pagerduty import PagerDutyConnector
+from autopilot.connectors.tavily import TavilyConnector
+from autopilot.connectors.weather import WeatherConnector
 from autopilot.connectors.webhook import SentryConnector, WebhookConnector
 from autopilot.kernel import RuntimeKernel
 from autopilot.models import ActionResult, ApprovalStatus, AuthMode, GraphNodeKind, MissionGraphNode, Signal, StepStatus, WebhookSignalRequest, new_id, utc_now
@@ -33,6 +39,12 @@ CONNECTOR_CLASSES = {
     "slack": NotificationConnector,
     "sentry": SentryConnector,
     "webhook": WebhookConnector,
+    "pagerduty": PagerDutyConnector,
+    "notion": NotionConnector,
+    "tavily": TavilyConnector,
+    "weather": WeatherConnector,
+    "gmail": GmailConnector,
+    "google_drive": GoogleDriveConnector,
 }
 
 logging.basicConfig(
@@ -68,6 +80,20 @@ def require_write_access(request: Request) -> None:
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     runtime.resume_active()
+    # Optionally auto-connect demo-capable connectors on startup when enabled.
+    try:
+        if os.getenv("AUTOPILOT_AUTO_CONNECT_DEMO", "").lower() in {"1", "true", "yes"}:
+            for item in directory.catalog.values():
+                # Only auto-connect demo-capable connectors that don't require real credentials
+                if item.demo_available:
+                    try:
+                        directory.connect(item.id, AuthMode.DEMO)
+                        store.trace(None, "connector.autoconnect", "complete", {"connector": item.id})
+                    except Exception:
+                        store.trace(None, "connector.autoconnect", "failed", {"connector": item.id})
+    except Exception:
+        # Be conservative on startup — errors should not prevent the app from running.
+        pass
     yield
 
 app = FastAPI(
@@ -375,3 +401,187 @@ async def events() -> StreamingResponse:
             await asyncio.sleep(1)
 
     return StreamingResponse(stream(), media_type="text/event-stream")
+
+
+# ── Scoped agent routes ─────────────────────────────────────────────────────
+
+from autopilot.agents.specialized import CloudInfraAgent, ProjectMgmtAgent, SecurityAuditAgent
+from autopilot.state_store import StateStore as _StateStore
+
+@app.post("/api/agents/project-mgmt/create-issue")
+async def agent_project_mgmt_create_issue(request: Request, payload: dict[str, Any] | None = None) -> dict[str, Any]:
+    """Create a Linear follow-up issue through the ProjectMgmtAgent policy gate."""
+    require_write_access(request)
+    p = payload or {}
+    agent = ProjectMgmtAgent(store=_StateStore(), registry=registry)
+    result = await agent.create_follow_up_issue(
+        mission_id=p.get("mission_id"),
+        title=p.get("title"),
+        description=p.get("description"),
+        labels=p.get("labels"),
+    )
+    store.trace(p.get("mission_id"), "agent.project_mgmt.create_issue", result.status, result.model_dump())
+    return result.model_dump()
+
+
+@app.post("/api/agents/cloud-infra/trigger-deployment")
+async def agent_cloud_infra_trigger_deployment(request: Request, payload: dict[str, Any] | None = None) -> dict[str, Any]:
+    """Trigger a deployment through the CloudInfraAgent (webhook or GitHub Actions dispatch)."""
+    require_write_access(request)
+    p = payload or {}
+    agent = CloudInfraAgent(store=_StateStore(), registry=registry)
+    result = await agent.trigger_deployment(
+        mission_id=p.get("mission_id"),
+        environment=p.get("environment", "staging"),
+        ref=p.get("ref", "main"),
+        reason=p.get("reason", "AUTOPILOT deployment trigger"),
+        approved=bool(p.get("approved", False)),
+    )
+    store.trace(p.get("mission_id"), "agent.cloud_infra.trigger_deployment", result.status, result.model_dump())
+    return result.model_dump()
+
+
+@app.post("/api/agents/security-audit/pr-open")
+async def agent_security_audit_pr_open(request: Request, payload: dict[str, Any] | None = None) -> dict[str, Any]:
+    """Run a PR-open security audit: writes a durable artifact and emits an ops notification."""
+    require_write_access(request)
+    p = payload or {}
+    agent = SecurityAuditAgent(store=_StateStore(), registry=registry)
+    result = await agent.run_pr_open_audit(payload=p, mission_id=p.get("mission_id"))
+    store.trace(p.get("mission_id"), "agent.security_audit.pr_open", result.status, result.model_dump())
+    return result.model_dump()
+
+
+# ── Analytics API ────────────────────────────────────────────────────────────
+
+@app.get("/api/analytics/missions")
+async def analytics_missions() -> dict:
+    """Aggregate mission statistics."""
+    analytics = _StateStore(store.path)
+    return analytics.mission_stats()
+
+
+@app.get("/api/analytics/agents")
+async def analytics_agents() -> list[dict]:
+    """Per-role agent performance metrics."""
+    analytics = _StateStore(store.path)
+    return analytics.agent_performance()
+
+
+@app.get("/api/analytics/connectors")
+async def analytics_connectors() -> list[dict]:
+    """Per-connector action health."""
+    analytics = _StateStore(store.path)
+    return analytics.connector_health()
+
+
+# ── PagerDuty webhook ────────────────────────────────────────────────────────
+
+@app.post("/webhooks/pagerduty")
+async def webhook_pagerduty(request: Request) -> dict[str, Any]:
+    """Ingest PagerDuty incident webhooks."""
+    payload = await request.json()
+    connector = PagerDutyConnector()
+    signal = await connector.normalize_event(payload)
+    mission = await kernel.ingest(signal)
+    return {"status": "accepted", "mission_id": mission.id, "signal_id": signal.id}
+
+
+@app.post("/webhooks/jira")
+async def webhook_jira(request: Request) -> dict[str, Any]:
+    """Ingest Jira issue webhooks."""
+    payload = await request.json()
+    connector = JiraConnector()
+    signal = await connector.normalize_event(payload)
+    mission = await kernel.ingest(signal)
+    return {"status": "accepted", "mission_id": mission.id, "signal_id": signal.id}
+
+
+@app.post("/webhooks/weather")
+async def webhook_weather(request: Request) -> dict[str, Any]:
+    """Ingest weather alert webhooks."""
+    payload = await request.json()
+    connector = WeatherConnector()
+    signal = await connector.normalize_event(payload)
+    mission = await kernel.ingest(signal)
+    return {"status": "accepted", "mission_id": mission.id, "signal_id": signal.id}
+
+
+# ── OAuth2 Flow ───────────────────────────────────────────────────────────────
+
+from autopilot.connectors.oauth import (
+    OAuthTokenStore,
+    build_google_auth_url,
+    exchange_code,
+    google_configured,
+    SCOPES_GMAIL,
+    SCOPES_DRIVE,
+    SCOPES_COMBINED,
+)
+from fastapi.responses import RedirectResponse
+
+
+@app.get("/oauth/authorize/{connector_id}")
+async def oauth_authorize(connector_id: str) -> RedirectResponse:
+    """Redirect to Google OAuth2 consent screen for the given connector."""
+    if not google_configured():
+        return RedirectResponse(url="/?error=google_oauth_not_configured")
+    scopes_map = {
+        "gmail": SCOPES_GMAIL,
+        "google_drive": SCOPES_DRIVE,
+        "google": SCOPES_COMBINED,
+    }
+    scopes = scopes_map.get(connector_id, SCOPES_COMBINED)
+    auth_url = build_google_auth_url(state=connector_id, scopes=scopes)
+    return RedirectResponse(url=auth_url)
+
+
+@app.get("/oauth/callback/google")
+async def oauth_callback_google(
+    code: str | None = None,
+    state: str | None = None,
+    error: str | None = None,
+) -> RedirectResponse:
+    """Handle Google OAuth2 callback: exchange code → store tokens → redirect to UI."""
+    if error:
+        return RedirectResponse(url=f"/?oauth_error={error}")
+    if not code:
+        return RedirectResponse(url="/?oauth_error=missing_code")
+    try:
+        token_data = await exchange_code(code)
+        connector_id = state or "google"
+        token_store = OAuthTokenStore(store.path)
+        # Save tokens for the specific connector requested
+        token_store.save(connector_id, token_data)
+        # If combined scope, also mark both gmail and drive as connected
+        if connector_id == "google":
+            token_store.save("gmail", token_data)
+            token_store.save("google_drive", token_data)
+        return RedirectResponse(url=f"/?oauth_success={connector_id}")
+    except Exception as e:
+        return RedirectResponse(url=f"/?oauth_error={str(e)[:100]}")
+
+
+@app.delete("/oauth/revoke/{connector_id}")
+async def oauth_revoke(connector_id: str) -> dict[str, str]:
+    """Disconnect an OAuth connector by deleting stored tokens."""
+    token_store = OAuthTokenStore(store.path)
+    token_store.delete(connector_id)
+    return {"status": "revoked", "connector_id": connector_id}
+
+
+@app.get("/oauth/status")
+async def oauth_status() -> dict[str, Any]:
+    """Return OAuth readiness for all connectors that use OAuth."""
+    token_store = OAuthTokenStore(store.path)
+    oauth_connectors = ["gmail", "google_drive"]
+    result = {}
+    for cid in oauth_connectors:
+        token = token_store.load(cid)
+        result[cid] = {
+            "authorized": bool(token and token.get("access_token")),
+            "google_configured": google_configured(),
+            "auth_url": f"/oauth/authorize/{cid}" if not token else None,
+        }
+    return result
+

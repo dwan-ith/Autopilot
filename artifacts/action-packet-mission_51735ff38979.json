@@ -1,0 +1,35 @@
+{
+  "packet_name": "action-packet-mission_51735ff38979",
+  "mission_id": "mission_51735ff38979",
+  "title": "checkout: Checkout latency p95 is above SLA.",
+  "severity": "high",
+  "confidence": 0.21,
+  "hypotheses": [
+    {
+      "id": "hyp_037ca9a86714",
+      "title": "Customer-impacting operational incident",
+      "rationale": "Active user impact requiring SLA-level response.",
+      "confidence": 0.35,
+      "evidence_ids": [],
+      "status": "open"
+    },
+    {
+      "id": "hyp_3091e0cf981e",
+      "title": "Service dependency degradation",
+      "rationale": "An upstream dependency (database, queue, third-party) is degraded.",
+      "confidence": 0.35,
+      "evidence_ids": [],
+      "status": "open"
+    },
+    {
+      "id": "hyp_e0192464b4f3",
+      "title": "Broad evidence sweep",
+      "rationale": "Low confidence; run wider search around checkout.",
+      "confidence": 0.3,
+      "evidence_ids": [],
+      "status": "open"
+    }
+  ],
+  "evidence_count": 0,
+  "recommended_action": "Notify the owning team and create a follow-up task."
+}

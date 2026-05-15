@@ -34,7 +34,6 @@ This repository contains a working MVP:
 ## Quickstart
 
 ```powershell
-cd C:\Users\aacer\Documents\Anvil\autopilot
 # 1. Start the Backend
 python -m venv venv
 .\venv\Scripts\Activate.ps1
@@ -154,39 +153,40 @@ catalog metadata.
 
 ## Bounded Action Examples
 
-Trigger the scoped deployment action:
+Trigger a deployment through the CloudInfra scoped agent:
 
 ```powershell
 Invoke-RestMethod -Method Post `
-  -Uri http://127.0.0.1:8090/api/actions/cloud_infra/trigger_deployment `
+  -Uri http://127.0.0.1:8090/api/agents/cloud-infra/trigger-deployment `
   -ContentType "application/json" `
-  -Body '{"payload":{"environment":"staging","ref":"main","reason":"demo deployment"}}'
+  -Body '{"environment":"staging","ref":"main","reason":"demo deployment"}'
 ```
 
-Create a Linear follow-up issue, or skip external creation when Linear credentials are absent:
+Create a Linear follow-up issue through the ProjectMgmt scoped agent:
 
 ```powershell
 Invoke-RestMethod -Method Post `
-  -Uri http://127.0.0.1:8090/api/actions/linear/create_issue `
+  -Uri http://127.0.0.1:8090/api/agents/project-mgmt/create-issue `
   -ContentType "application/json" `
-  -Body '{"payload":{"title":"Investigate export incident","description":"AUTOPILOT demo follow-up"}}'
+  -Body '{"title":"Investigate export incident","description":"AUTOPILOT demo follow-up"}'
 ```
 
-Send a PR-open security audit trigger:
+Run a PR-open security audit:
+
+```powershell
+Invoke-RestMethod -Method Post `
+  -Uri http://127.0.0.1:8090/api/agents/security-audit/pr-open `
+  -ContentType "application/json" `
+  -Body '{"action":"opened","repository":{"full_name":"demo/app"},"pull_request":{"number":42,"title":"Update auth flow","head":{"ref":"auth-update"}}}'
+```
+
+Or trigger the Sentry webhook directly:
 
 ```powershell
 Invoke-RestMethod -Method Post `
   -Uri http://127.0.0.1:8090/webhooks/security_audit `
   -ContentType "application/json" `
-  -Body '{"action":"opened","repository":{"full_name":"demo/app"},"pull_request":{"number":42,"title":"Update auth flow","head":{"ref":"auth-update"}}}'
-```
-
-Run the scoped agents directly:
-
-```text
-POST /api/agents/project-mgmt/create-issue
-POST /api/agents/cloud-infra/trigger-deployment
-POST /api/agents/security-audit/pr-open
+  -Body '{"action":"opened","repository":{"full_name":"demo/app"},"pull_request":{"number":42,"title":"Update auth flow","head":{"ref":"auth-update"}}}'  
 ```
 
 Medium-risk write actions such as external issue creation are policy-blocked

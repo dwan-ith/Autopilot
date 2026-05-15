@@ -1,0 +1,28 @@
+services:
+  backend:
+    build: .
+    ports:
+      - "8090:8090"
+    env_file: .env
+    volumes:
+      - autopilot-data:/app/data
+      - autopilot-artifacts:/app/artifacts
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8090/health')"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+
+  frontend:
+    build: ./client
+    ports:
+      - "3000:3000"
+    environment:
+      - AUTOPILOT_API_ORIGIN=http://backend:8090
+    depends_on:
+      backend:
+        condition: service_healthy
+
+volumes:
+  autopilot-data:
+  autopilot-artifacts:

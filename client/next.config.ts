@@ -3,6 +3,7 @@ import type { NextConfig } from "next";
 const backendOrigin = process.env.AUTOPILOT_API_ORIGIN || "http://127.0.0.1:8090";
 
 const nextConfig: NextConfig = {
+  output: "standalone",
   turbopack: {
     root: process.cwd(),
   },

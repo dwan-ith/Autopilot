@@ -404,4 +404,80 @@ class Store:
 
 
 class StateStore(Store):
-    """Shared durable mission state for orchestrator, agents, traces, and analytics."""
+    """Shared durable mission state for orchestrator, agents, traces, and analytics.
+
+    Extends Store with analytics read methods for dashboards and reporting.
+    """
+
+    def mission_stats(self) -> dict:
+        """Aggregate mission statistics: counts by status, avg confidence, replan rate."""
+        missions = self._all_missions()
+        if not missions:
+            return {"total": 0, "by_status": {}, "avg_confidence": 0.0, "avg_replans": 0.0, "avg_evidence": 0.0}
+
+        by_status: dict[str, int] = {}
+        total_conf = 0.0
+        total_replans = 0
+        total_evidence = 0
+        for m in missions:
+            by_status[m.status.value] = by_status.get(m.status.value, 0) + 1
+            total_conf += m.confidence
+            total_replans += m.replans
+            total_evidence += len(m.evidence)
+
+        n = len(missions)
+        return {
+            "total": n,
+            "by_status": by_status,
+            "avg_confidence": round(total_conf / n, 3),
+            "avg_replans": round(total_replans / n, 2),
+            "avg_evidence": round(total_evidence / n, 2),
+        }
+
+    def agent_performance(self) -> list[dict]:
+        """Per-role agent metrics: call count, avg tool calls, avg confidence, failure rate."""
+        missions = self._all_missions()
+        roles: dict[str, dict] = {}
+        for m in missions:
+            for run in m.agent_runs:
+                role = run.role
+                if role not in roles:
+                    roles[role] = {"role": role, "runs": 0, "total_tool_calls": 0, "total_conf": 0.0, "failures": 0, "total_duration_ms": 0.0}
+                bucket = roles[role]
+                bucket["runs"] += 1
+                bucket["total_tool_calls"] += run.tool_calls
+                bucket["total_conf"] += run.confidence
+                bucket["total_duration_ms"] += run.duration_ms
+                if run.status.value == "failed":
+                    bucket["failures"] += 1
+
+        result = []
+        for bucket in roles.values():
+            n = bucket["runs"]
+            result.append({
+                "role": bucket["role"],
+                "total_runs": n,
+                "avg_tool_calls": round(bucket["total_tool_calls"] / n, 1) if n else 0,
+                "avg_confidence": round(bucket["total_conf"] / n, 3) if n else 0,
+                "failure_rate": round(bucket["failures"] / n, 3) if n else 0,
+                "avg_duration_ms": round(bucket["total_duration_ms"] / n, 1) if n else 0,
+            })
+        return sorted(result, key=lambda r: r["total_runs"], reverse=True)
+
+    def connector_health(self) -> list[dict]:
+        """Per-connector action health: total actions, success/fail/skip counts."""
+        missions = self._all_missions()
+        connectors: dict[str, dict] = {}
+        for m in missions:
+            for action in m.actions:
+                name = action.connector
+                if name not in connectors:
+                    connectors[name] = {"connector": name, "total": 0, "complete": 0, "failed": 0, "skipped": 0, "blocked": 0}
+                bucket = connectors[name]
+                bucket["total"] += 1
+                status = action.status
+                if status in bucket:
+                    bucket[status] += 1
+
+        return sorted(connectors.values(), key=lambda c: c["total"], reverse=True)
+

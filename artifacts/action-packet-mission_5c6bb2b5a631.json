@@ -1,0 +1,43 @@
+{
+  "packet_name": "action-packet-mission_5c6bb2b5a631",
+  "mission_id": "mission_5c6bb2b5a631",
+  "title": "export service: Enterprise customer reports failed exports after today's rollout.",
+  "severity": "high",
+  "confidence": 0.78,
+  "hypotheses": [
+    {
+      "id": "hyp_85e935c50618",
+      "title": "Configuration error in new export pipeline",
+      "rationale": "The experimental export pipeline rollout likely introduced a configuration error that is causing export failures specifically for enterprise customers. This could be related to resource allocation, data format handling, or authentication.",
+      "confidence": 0.58,
+      "evidence_ids": [],
+      "status": "open"
+    },
+    {
+      "id": "hyp_a123c9a42c95",
+      "title": "Code defect in new export pipeline",
+      "rationale": "A code defect in the new export pipeline could be causing the increased export failures. This could be related to data processing, error handling, or interaction with external dependencies.",
+      "confidence": 0.58,
+      "evidence_ids": [],
+      "status": "open"
+    },
+    {
+      "id": "hyp_b78ac3b06d6f",
+      "title": "Resource contention in the export service",
+      "rationale": "The new export pipeline might be consuming excessive resources (CPU, memory, network) leading to resource contention and export failures, especially under the load of enterprise customers.",
+      "confidence": 0.4,
+      "evidence_ids": [],
+      "status": "open"
+    },
+    {
+      "id": "hyp_ad059236e178",
+      "title": "Dependency issue with a shared service",
+      "rationale": "The export service relies on a shared service (e.g., database, storage) that is experiencing issues. The rollout might have amplified the impact of these issues, leading to export failures.",
+      "confidence": 0.58,
+      "evidence_ids": [],
+      "status": "open"
+    }
+  ],
+  "evidence_count": 4,
+  "recommended_action": "Notify the owning team and create a follow-up task."
+}

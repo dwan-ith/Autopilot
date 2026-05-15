@@ -1,10 +1,11 @@
 "use client";
 
-import { useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import type { ElementType } from "react";
 import {
   Activity,
   ArrowRight,
+  BarChart3,
   Bot,
   CheckCircle2,
   Command,
@@ -25,6 +26,7 @@ import {
 } from "lucide-react";
 import { motion, AnimatePresence } from "framer-motion";
 import { formatDistanceToNow } from "date-fns";
+import axios from "axios";
 import { BackendConnection, ManualSignal, useAutopilot } from "@/hooks/useAutopilot";
 import { cn } from "@/lib/utils";
 import {
@@ -33,9 +35,12 @@ import {
   Connector,
   ConnectorDirectoryItem,
   Mission,
+  MissionGraphNode,
 } from "@/types";
 
-type View = "dashboard" | "connectors" | "approvals" | "traces";
+const API_BASE = process.env.NEXT_PUBLIC_API_URL || "";
+
+type View = "dashboard" | "connectors" | "approvals" | "traces" | "analytics";
 
 export default function Dashboard() {
   const {
@@ -120,6 +125,12 @@ export default function Dashboard() {
             active={currentView === "traces"}
             onClick={() => setCurrentView("traces")}
             count={traces.length}
+          />
+          <NavItem
+            icon={BarChart3}
+            label="Analytics"
+            active={currentView === "analytics"}
+            onClick={() => setCurrentView("analytics")}
           />
         </nav>
 
@@ -326,6 +337,18 @@ export default function Dashboard() {
                     </div>
                   ))}
                 </div>
+              </motion.div>
+            )}
+
+            {currentView === "analytics" && (
+              <motion.div
+                key="analytics"
+                initial={{ opacity: 0, y: 10 }}
+                animate={{ opacity: 1, y: 0 }}
+                exit={{ opacity: 0, y: -10 }}
+                className="p-8 max-w-5xl mx-auto"
+              >
+                <AnalyticsView />
               </motion.div>
             )}
           </AnimatePresence>
@@ -668,30 +691,14 @@ function MissionDetail({ mission }: { mission: Mission }) {
         </div>
       </section>
 
-      {/* Graph Flow */}
+      {/* Graph Flow — DAG Visualization */}
       <section className="space-y-6">
         <div className="flex items-center gap-3 border-b border-border/30 pb-4">
           <GitBranch className="h-5 w-5 text-muted-foreground/40" />
           <h3 className="text-lg font-bold tracking-tight">Execution Graph</h3>
           <span className="text-xs text-muted-foreground font-bold opacity-40">{mission.graph?.length} NODES</span>
         </div>
-        <div className="relative space-y-4 pl-6 before:absolute before:left-[11px] before:top-2 before:bottom-2 before:w-px before:bg-gradient-to-b before:from-primary/20 before:via-border before:to-transparent">
-          {mission.graph?.map((node) => (
-            <div key={node.id} className="relative group">
-              <div className={cn(
-                "absolute -left-[21px] top-3 h-3 w-3 rounded-full border-2 border-background z-10",
-                node.status === "complete" ? "bg-emerald-500 shadow-[0_0_8px_rgba(16,185,129,0.4)]" : "bg-amber-400"
-              )} />
-              <div className="rounded-xl border border-border/40 bg-white/[0.01] p-4 transition-all group-hover:border-border/80 group-hover:bg-white/[0.03]">
-                <div className="flex items-center gap-3 mb-2">
-                  <span className="text-[10px] font-black uppercase tracking-widest text-muted-foreground/40">{node.kind}</span>
-                  <h4 className="text-[14px] font-bold">{node.title}</h4>
-                </div>
-                <p className="text-[13px] leading-relaxed text-muted-foreground/60">{node.summary}</p>
-              </div>
-            </div>
-          ))}
-        </div>
+        <MissionDAG nodes={mission.graph || []} />
       </section>
 
       {/* Final Action / Outcome */}
@@ -885,6 +892,341 @@ function ConnectorCard({
           <p className="text-[11px] font-bold text-muted-foreground uppercase tracking-widest">OAuth adapter pending</p>
         </div>
       )}
+    </div>
+  );
+}
+
+// ── DAG Visualization ─────────────────────────────────────────────────────
+
+const NODE_KIND_COLORS: Record<string, { bg: string; border: string; text: string; glow: string }> = {
+  signal:     { bg: "bg-blue-500/10",    border: "border-blue-500/30",    text: "text-blue-400",    glow: "shadow-[0_0_12px_rgba(59,130,246,0.3)]" },
+  hypothesis: { bg: "bg-violet-500/10",  border: "border-violet-500/30",  text: "text-violet-400",  glow: "shadow-[0_0_12px_rgba(139,92,246,0.3)]" },
+  branch:     { bg: "bg-cyan-500/10",    border: "border-cyan-500/30",    text: "text-cyan-400",    glow: "shadow-[0_0_12px_rgba(6,182,212,0.3)]" },
+  subagent:   { bg: "bg-amber-500/10",   border: "border-amber-500/30",   text: "text-amber-400",   glow: "shadow-[0_0_12px_rgba(245,158,11,0.3)]" },
+  operator:   { bg: "bg-pink-500/10",    border: "border-pink-500/30",    text: "text-pink-400",    glow: "shadow-[0_0_12px_rgba(236,72,153,0.3)]" },
+  replan:     { bg: "bg-orange-500/10",   border: "border-orange-500/30",  text: "text-orange-400",  glow: "shadow-[0_0_12px_rgba(249,115,22,0.3)]" },
+  action:     { bg: "bg-emerald-500/10", border: "border-emerald-500/30", text: "text-emerald-400", glow: "shadow-[0_0_12px_rgba(16,185,129,0.3)]" },
+  policy:     { bg: "bg-red-500/10",     border: "border-red-500/30",     text: "text-red-400",     glow: "shadow-[0_0_12px_rgba(239,68,68,0.3)]" },
+  validation: { bg: "bg-teal-500/10",    border: "border-teal-500/30",    text: "text-teal-400",    glow: "shadow-[0_0_12px_rgba(20,184,166,0.3)]" },
+};
+
+const DEFAULT_COLOR = { bg: "bg-white/5", border: "border-white/10", text: "text-muted-foreground", glow: "" };
+
+function MissionDAG({ nodes }: { nodes: MissionGraphNode[] }) {
+  if (!nodes.length) {
+    return (
+      <div className="rounded-lg border border-border/40 bg-white/[0.01] p-8 text-center text-[13px] text-muted-foreground">
+        No graph nodes recorded for this mission.
+      </div>
+    );
+  }
+
+  // Build a depth map using BFS from root nodes
+  const nodeMap = new Map(nodes.map(n => [n.id, n]));
+  const childrenMap = new Map<string, string[]>();
+  const roots: string[] = [];
+
+  for (const node of nodes) {
+    if (!node.parent_ids || node.parent_ids.length === 0) {
+      roots.push(node.id);
+    }
+    for (const pid of (node.parent_ids || [])) {
+      const existing = childrenMap.get(pid) || [];
+      existing.push(node.id);
+      childrenMap.set(pid, existing);
+    }
+  }
+
+  // BFS to assign depths
+  const depthMap = new Map<string, number>();
+  const queue = roots.map(id => ({ id, depth: 0 }));
+  const visited = new Set<string>();
+  while (queue.length > 0) {
+    const { id, depth } = queue.shift()!;
+    if (visited.has(id)) continue;
+    visited.add(id);
+    depthMap.set(id, depth);
+    for (const childId of (childrenMap.get(id) || [])) {
+      if (!visited.has(childId)) {
+        queue.push({ id: childId, depth: depth + 1 });
+      }
+    }
+  }
+  // Nodes not reached by BFS
+  for (const node of nodes) {
+    if (!depthMap.has(node.id)) depthMap.set(node.id, 0);
+  }
+
+  // Group by depth
+  const maxDepth = Math.max(...Array.from(depthMap.values()), 0);
+  const layers: MissionGraphNode[][] = [];
+  for (let d = 0; d <= maxDepth; d++) {
+    layers.push(nodes.filter(n => depthMap.get(n.id) === d));
+  }
+
+  return (
+    <div className="space-y-3">
+      {layers.map((layer, depth) => (
+        <div key={depth} className="relative">
+          {/* Depth indicator */}
+          {depth > 0 && (
+            <div className="flex justify-center mb-3">
+              <div className="h-6 w-px bg-gradient-to-b from-primary/30 to-primary/5" />
+            </div>
+          )}
+          <div className={cn(
+            "grid gap-3",
+            layer.length === 1 ? "grid-cols-1 max-w-2xl mx-auto" :
+            layer.length === 2 ? "grid-cols-2" :
+            layer.length === 3 ? "grid-cols-3" :
+            "grid-cols-2 lg:grid-cols-4"
+          )}>
+            {layer.map((node, i) => {
+              const colors = NODE_KIND_COLORS[node.kind] || DEFAULT_COLOR;
+              const isComplete = node.status === "complete";
+              return (
+                <motion.div
+                  key={node.id}
+                  initial={{ opacity: 0, y: 16, scale: 0.95 }}
+                  animate={{ opacity: 1, y: 0, scale: 1 }}
+                  transition={{ delay: depth * 0.08 + i * 0.04, duration: 0.35, ease: "easeOut" }}
+                  className={cn(
+                    "group relative rounded-xl border p-4 transition-all hover:scale-[1.02]",
+                    colors.bg, colors.border,
+                    isComplete && colors.glow
+                  )}
+                >
+                  {/* Status dot */}
+                  <div className={cn(
+                    "absolute -top-1.5 -right-1.5 h-3 w-3 rounded-full border-2 border-background",
+                    isComplete ? "bg-emerald-500" : node.status === "failed" ? "bg-red-500" : "bg-amber-400 animate-pulse"
+                  )} />
+
+                  <div className="flex items-center gap-2 mb-2">
+                    <span className={cn("text-[9px] font-black uppercase tracking-widest", colors.text)}>
+                      {node.kind}
+                    </span>
+                    {node.branch_id && (
+                      <span className="text-[8px] font-mono text-muted-foreground/30 truncate">
+                        ⎇ {node.branch_id.slice(0, 8)}
+                      </span>
+                    )}
+                  </div>
+                  <h4 className="text-[13px] font-bold leading-tight mb-1.5 line-clamp-2">{node.title}</h4>
+                  <p className="text-[11px] leading-relaxed text-muted-foreground/50 line-clamp-2">{node.summary}</p>
+
+                  {/* Parent connection indicator */}
+                  {node.parent_ids && node.parent_ids.length > 0 && (
+                    <div className="mt-2 flex items-center gap-1 text-[9px] text-muted-foreground/30 font-mono">
+                      <span>← {node.parent_ids.length} parent{node.parent_ids.length > 1 ? "s" : ""}</span>
+                    </div>
+                  )}
+                </motion.div>
+              );
+            })}
+          </div>
+        </div>
+      ))}
+    </div>
+  );
+}
+
+// ── Analytics View ────────────────────────────────────────────────────────
+
+interface MissionStats {
+  total: number;
+  by_status: Record<string, number>;
+  avg_confidence: number;
+  avg_replans: number;
+  avg_evidence: number;
+}
+
+interface AgentPerf {
+  role: string;
+  total_runs: number;
+  avg_tool_calls: number;
+  avg_confidence: number;
+  failure_rate: number;
+  avg_duration_ms: number;
+}
+
+interface ConnectorHealth {
+  connector: string;
+  total: number;
+  complete: number;
+  failed: number;
+  skipped: number;
+  blocked: number;
+}
+
+function AnalyticsView() {
+  const [stats, setStats] = useState<MissionStats | null>(null);
+  const [agents, setAgents] = useState<AgentPerf[]>([]);
+  const [connHealth, setConnHealth] = useState<ConnectorHealth[]>([]);
+  const [loading, setLoading] = useState(true);
+
+  const fetchAnalytics = useCallback(async () => {
+    try {
+      const [s, a, c] = await Promise.all([
+        axios.get(`${API_BASE}/api/analytics/missions`),
+        axios.get(`${API_BASE}/api/analytics/agents`),
+        axios.get(`${API_BASE}/api/analytics/connectors`),
+      ]);
+      setStats(s.data);
+      setAgents(a.data);
+      setConnHealth(c.data);
+    } catch (err) {
+      console.error("Failed to fetch analytics:", err);
+    } finally {
+      setLoading(false);
+    }
+  }, []);
+
+  useEffect(() => {
+    void fetchAnalytics();
+    const interval = setInterval(fetchAnalytics, 5000);
+    return () => clearInterval(interval);
+  }, [fetchAnalytics]);
+
+  if (loading) {
+    return (
+      <div className="flex items-center justify-center h-64 text-muted-foreground">
+        <Activity className="h-5 w-5 animate-spin mr-3" />
+        Loading analytics...
+      </div>
+    );
+  }
+
+  return (
+    <div className="space-y-10">
+      <div>
+        <h1 className="text-2xl font-bold tracking-tight">Analytics</h1>
+        <p className="text-muted-foreground mt-2 text-[14px]">
+          Runtime performance metrics across missions, agents, and connectors.
+        </p>
+      </div>
+
+      {/* Mission Stats Cards */}
+      {stats && (
+        <section className="space-y-4">
+          <h2 className="text-sm font-bold uppercase tracking-wider text-muted-foreground/60">Mission Overview</h2>
+          <div className="grid grid-cols-2 md:grid-cols-5 gap-3">
+            <AnalyticCard label="Total Missions" value={stats.total.toString()} accent="text-foreground" />
+            <AnalyticCard label="Avg Confidence" value={`${Math.round(stats.avg_confidence * 100)}%`} accent="text-emerald-400" />
+            <AnalyticCard label="Avg Replans" value={stats.avg_replans.toFixed(1)} accent="text-amber-400" />
+            <AnalyticCard label="Avg Evidence" value={stats.avg_evidence.toFixed(1)} accent="text-blue-400" />
+            <AnalyticCard label="Complete" value={(stats.by_status?.complete || 0).toString()} accent="text-emerald-400" />
+          </div>
+          {Object.keys(stats.by_status).length > 0 && (
+            <div className="flex flex-wrap gap-2">
+              {Object.entries(stats.by_status).map(([status, count]) => (
+                <span key={status} className={cn(
+                  "rounded-full px-3 py-1 text-[11px] font-bold border",
+                  status === "complete" ? "border-emerald-500/20 bg-emerald-500/5 text-emerald-400"
+                    : status === "failed" ? "border-red-500/20 bg-red-500/5 text-red-400"
+                    : "border-amber-500/20 bg-amber-500/5 text-amber-400"
+                )}>
+                  {status}: {count}
+                </span>
+              ))}
+            </div>
+          )}
+        </section>
+      )}
+
+      {/* Agent Performance Table */}
+      {agents.length > 0 && (
+        <section className="space-y-4">
+          <h2 className="text-sm font-bold uppercase tracking-wider text-muted-foreground/60">Agent Performance</h2>
+          <div className="rounded-xl border border-border/40 overflow-hidden">
+            <table className="w-full text-[12px]">
+              <thead>
+                <tr className="border-b border-border/30 bg-white/[0.02]">
+                  <th className="text-left px-4 py-3 font-bold uppercase tracking-wider text-muted-foreground/60 text-[10px]">Role</th>
+                  <th className="text-right px-4 py-3 font-bold uppercase tracking-wider text-muted-foreground/60 text-[10px]">Runs</th>
+                  <th className="text-right px-4 py-3 font-bold uppercase tracking-wider text-muted-foreground/60 text-[10px]">Avg Tools</th>
+                  <th className="text-right px-4 py-3 font-bold uppercase tracking-wider text-muted-foreground/60 text-[10px]">Avg Conf</th>
+                  <th className="text-right px-4 py-3 font-bold uppercase tracking-wider text-muted-foreground/60 text-[10px]">Fail Rate</th>
+                  <th className="text-right px-4 py-3 font-bold uppercase tracking-wider text-muted-foreground/60 text-[10px]">Avg Duration</th>
+                </tr>
+              </thead>
+              <tbody>
+                {agents.map((a) => (
+                  <tr key={a.role} className="border-b border-border/20 hover:bg-white/[0.02] transition-colors">
+                    <td className="px-4 py-3 font-bold">{a.role}</td>
+                    <td className="text-right px-4 py-3 tabular-nums">{a.total_runs}</td>
+                    <td className="text-right px-4 py-3 tabular-nums">{a.avg_tool_calls}</td>
+                    <td className="text-right px-4 py-3 tabular-nums">
+                      <span className={a.avg_confidence >= 0.7 ? "text-emerald-400" : a.avg_confidence >= 0.4 ? "text-amber-400" : "text-red-400"}>
+                        {Math.round(a.avg_confidence * 100)}%
+                      </span>
+                    </td>
+                    <td className="text-right px-4 py-3 tabular-nums">
+                      <span className={a.failure_rate === 0 ? "text-emerald-400" : "text-red-400"}>
+                        {Math.round(a.failure_rate * 100)}%
+                      </span>
+                    </td>
+                    <td className="text-right px-4 py-3 tabular-nums text-muted-foreground">{a.avg_duration_ms.toFixed(0)}ms</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        </section>
+      )}
+
+      {/* Connector Health */}
+      {connHealth.length > 0 && (
+        <section className="space-y-4">
+          <h2 className="text-sm font-bold uppercase tracking-wider text-muted-foreground/60">Connector Health</h2>
+          <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+            {connHealth.map((c) => {
+              const successRate = c.total > 0 ? c.complete / c.total : 0;
+              return (
+                <div key={c.connector} className="rounded-xl border border-border/40 bg-white/[0.01] p-4 space-y-3">
+                  <div className="flex items-center justify-between">
+                    <span className="font-bold text-[13px]">{c.connector}</span>
+                    <span className="text-[11px] text-muted-foreground tabular-nums">{c.total} actions</span>
+                  </div>
+                  {/* Progress bar */}
+                  <div className="h-2 rounded-full bg-white/5 overflow-hidden">
+                    <div
+                      className={cn(
+                        "h-full rounded-full transition-all duration-500",
+                        successRate >= 0.8 ? "bg-emerald-500" : successRate >= 0.5 ? "bg-amber-500" : "bg-red-500"
+                      )}
+                      style={{ width: `${Math.max(successRate * 100, 2)}%` }}
+                    />
+                  </div>
+                  <div className="flex gap-3 text-[10px] font-bold">
+                    {c.complete > 0 && <span className="text-emerald-400">{c.complete} complete</span>}
+                    {c.skipped > 0 && <span className="text-amber-400">{c.skipped} skipped</span>}
+                    {c.blocked > 0 && <span className="text-orange-400">{c.blocked} blocked</span>}
+                    {c.failed > 0 && <span className="text-red-400">{c.failed} failed</span>}
+                  </div>
+                </div>
+              );
+            })}
+          </div>
+        </section>
+      )}
+
+      {!stats?.total && agents.length === 0 && connHealth.length === 0 && (
+        <div className="rounded-lg border border-border/40 bg-white/[0.01] p-12 text-center text-muted-foreground">
+          <BarChart3 className="h-10 w-10 mx-auto mb-4 opacity-20" />
+          <p className="text-[14px] font-bold">No analytics data yet</p>
+          <p className="text-[12px] mt-1 opacity-60">Run a simulation to generate mission, agent, and connector metrics.</p>
+        </div>
+      )}
+    </div>
+  );
+}
+
+function AnalyticCard({ label, value, accent }: { label: string; value: string; accent: string }) {
+  return (
+    <div className="rounded-xl border border-border/40 bg-white/[0.01] p-4">
+      <div className="text-[10px] font-bold uppercase tracking-widest text-muted-foreground/40 mb-1">{label}</div>
+      <div className={cn("text-[22px] font-black tracking-tight", accent)}>{value}</div>
     </div>
   );
 }

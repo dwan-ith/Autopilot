@@ -16,30 +16,38 @@ This repository contains a working MVP:
 
 - FastAPI webhook and dashboard server
 - SQLite-backed mission, step, trace, graph, and memory persistence
-- capability-declared connector registry
-- generic webhook connector
+- capability-declared connector registry and product-style connector directory
+- generic webhook connector plus Sentry webhook normalization
 - local knowledge connector with optional Tavily web search
 - artifact connector for durable Markdown reports
-- notification connector with Slack webhook or local fallback
+- notification connector with Slack webhook, outbound callback, or local fallback
+- Linear issue creation when `LINEAR_API_KEY` and `LINEAR_TEAM_ID` are configured
 - scoped operator suite with optional LLM reasoning and deterministic fallback
 - adaptive replanning when correlated signals arrive mid-mission or confidence is low
-- explicit policy decisions before side effects
+- explicit per-action policy decisions before side effects
+- signal idempotency keys, duplicate suppression, and mission cancellation
 - live dashboard with mission graph, evidence, policy, actions, and trace
 
 ## Quickstart
 
 ```powershell
 cd C:\Users\aacer\Documents\Anvil\autopilot
+# 1. Start the Backend
 python -m venv venv
 .\venv\Scripts\Activate.ps1
 pip install -r requirements.txt
 python run_server.py
+
+# 2. Start the Modern Frontend (New Terminal)
+cd client
+npm install
+npm run dev
 ```
 
 Open:
 
 ```text
-http://127.0.0.1:8090
+http://localhost:3000
 ```
 
 Click **Run Demo**.
@@ -81,14 +89,42 @@ To force deterministic mode:
 $env:AUTOPILOT_DISABLE_LLM="1"
 ```
 
-## Connectors
+## Connector Directory
+
+AUTOPILOT's connector directory is modeled after product connectors in systems
+like AI computers and agent workspaces: a searchable catalog of external
+services, each with auth mode, scopes, objects, events, capabilities, and safe
+actions.
+
+The MVP ships a demo-mode catalog for:
+
+- Gmail
+- Slack
+- Google Drive
+- Notion
+- Linear
+- Jira
+- Sentry
+- PagerDuty
+- Zendesk
+- Web Search
+- Local Artifacts
+
+Click **Connect** in the dashboard to create a durable demo connection record.
+For API-key or webhook connectors, pass a `credentials_ref` such as
+`SLACK_WEBHOOK_URL` or `LINEAR_API_KEY`; secret values are not stored in the
+catalog metadata.
+
+## Runtime Adapters
 
 | Connector | Capabilities | Safe actions |
 | --- | --- | --- |
 | `webhook` | read | none |
+| `sentry` | read, search | `mark_investigating` |
 | `knowledge` | search, read | none |
 | `artifact` | write, action | `write_report`, `write_action_packet` |
 | `notification` | notify, action | `notify_ops`, `webhook_callback` |
+| `linear` | write, action | `create_issue` |
 
 ## Architecture
 
@@ -98,8 +134,8 @@ $env:AUTOPILOT_DISABLE_LLM="1"
 | Normalized models | `Signal`, `Mission`, `Hypothesis`, `Evidence`, `ActionResult` |
 | Runtime kernel | Correlation, scheduling, graph execution, retries, persistence |
 | Operator suite | Evaluation, planning, investigation, verification, replanning, synthesis |
-| Policy engine | Blocks unsafe or low-confidence side effects |
-| Trace sink | Local traces with Omium-ready metadata |
+| Policy engine | Blocks unsafe, high-risk, or low-confidence side effects |
+| Trace sink | Local traces and optional Omium SDK forwarding when available |
 
 ## Tests
 
@@ -138,6 +174,6 @@ CI / automated runs: add `GITHUB_TOKEN` and other secrets to your CI environment
 
 ## Omium
 
-Set `OMIUM_API_KEY` in `.env` to mark traces as Omium-ready. The current
-implementation records local trace events with causal step IDs; the integration
-point is isolated in `src/autopilot/tracing/omium.py`.
+Set `OMIUM_API_KEY` in `.env` to enable optional Omium SDK forwarding. AUTOPILOT
+still records every event locally with causal step IDs, and the trace sink
+attempts to call a loaded Omium SDK through common trace/event methods.

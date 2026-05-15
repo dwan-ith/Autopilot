@@ -7,8 +7,10 @@ from uuid import uuid4
 os.environ["AUTOPILOT_DISABLE_LLM"] = "1"
 
 from autopilot.connectors import default_registry
+from autopilot.connectors.service import ConnectorDirectory
+from autopilot.connectors.webhook import SentryConnector
 from autopilot.kernel import RuntimeKernel
-from autopilot.models import MissionStatus, Signal
+from autopilot.models import AuthMode, ConnectorStatus, GraphNodeKind, MissionStatus, Signal
 from autopilot.storage import Store
 
 
@@ -18,7 +20,7 @@ class RuntimeKernelTest(unittest.TestCase):
             tmp_dir = Path.cwd() / ".tmp"
             tmp_dir.mkdir(exist_ok=True)
             store = Store(tmp_dir / f"autopilot-{uuid4().hex}.db")
-            runtime = RuntimeKernel(store, default_registry())
+            runtime = RuntimeKernel(store, default_registry(), correlation_window_seconds=0.05)
 
             first = Signal(
                 source="support_webhook",
@@ -48,6 +50,11 @@ class RuntimeKernelTest(unittest.TestCase):
             self.assertGreaterEqual(len(completed.actions), 1)
             self.assertGreaterEqual(len(completed.policy_decisions), 1)
             self.assertGreaterEqual(len(completed.graph), 1)
+            graph_kinds = {node.kind for node in completed.graph}
+            self.assertIn(GraphNodeKind.HYPOTHESIS, graph_kinds)
+            self.assertIn(GraphNodeKind.BRANCH, graph_kinds)
+            self.assertIn(GraphNodeKind.POLICY, graph_kinds)
+            self.assertIn(GraphNodeKind.ACTION, graph_kinds)
 
             steps = store.list_steps(mission.id)
             self.assertTrue(any(step["name"] == "Verification Gate" for step in steps))
@@ -61,6 +68,84 @@ class RuntimeKernelTest(unittest.TestCase):
                     }
                 ),
             )
+
+        asyncio.run(scenario())
+
+    def test_connector_directory_persists_demo_connections(self):
+        tmp_dir = Path.cwd() / ".tmp"
+        tmp_dir.mkdir(exist_ok=True)
+        store = Store(tmp_dir / f"autopilot-{uuid4().hex}.db")
+        directory = ConnectorDirectory(store)
+
+        items = directory.list()
+        self.assertTrue(any(item["id"] == "slack" for item in items))
+
+        connection = directory.connect(
+            "slack",
+            auth_mode=AuthMode.WEBHOOK,
+            credentials_ref="SLACK_WEBHOOK_URL",
+            metadata={"webhook_url": "https://hooks.slack.example/secret", "workspace": "demo"},
+        )
+        self.assertEqual(connection.status, ConnectorStatus.CONNECTED)
+        self.assertIn("chat.write", connection.granted_scopes)
+        self.assertEqual(connection.credentials_ref, "SLACK_WEBHOOK_URL")
+        self.assertEqual(connection.metadata["webhook_url"], "***redacted***")
+
+        reloaded = ConnectorDirectory(store).list()
+        slack = next(item for item in reloaded if item["id"] == "slack")
+        self.assertEqual(slack["status"], "connected")
+        self.assertTrue(slack["implemented"])
+        self.assertEqual(slack["credentials_ref"], "SLACK_WEBHOOK_URL")
+
+    def test_idempotent_signal_does_not_spawn_duplicate_missions(self):
+        async def scenario():
+            tmp_dir = Path.cwd() / ".tmp"
+            tmp_dir.mkdir(exist_ok=True)
+            store = Store(tmp_dir / f"autopilot-{uuid4().hex}.db")
+            runtime = RuntimeKernel(store, default_registry(), correlation_window_seconds=0.01)
+
+            signal = Signal(
+                source="pagerduty",
+                type="incident.triggered",
+                summary="Checkout latency p95 is above SLA.",
+                entities=["checkout"],
+                urgency="high",
+                idempotency_key="pagerduty:incident:123",
+            )
+            first = await runtime.ingest(signal)
+            second = await runtime.ingest(
+                Signal(
+                    source="pagerduty",
+                    type="incident.triggered",
+                    summary="Checkout latency p95 is above SLA.",
+                    entities=["checkout"],
+                    urgency="high",
+                    idempotency_key="pagerduty:incident:123",
+                )
+            )
+            await runtime.wait_for(first.id)
+            self.assertEqual(first.id, second.id)
+            self.assertEqual(len(store.list_missions()), 1)
+            self.assertTrue(any(trace["name"] == "signal.duplicate" for trace in store.list_traces(first.id)))
+
+        asyncio.run(scenario())
+
+    def test_sentry_connector_normalizes_real_webhook_shape(self):
+        async def scenario():
+            signal = await SentryConnector().normalize_event(
+                {
+                    "action": "regression",
+                    "data": {
+                        "event": {"event_id": "evt-1", "title": "TypeError in checkout", "culprit": "checkout.views"},
+                        "project": {"slug": "storefront"},
+                        "issue": {"shortId": "SHOP-42"},
+                    },
+                }
+            )
+            self.assertEqual(signal.source, "sentry")
+            self.assertEqual(signal.idempotency_key, "sentry:evt-1")
+            self.assertIn("storefront", signal.entities)
+            self.assertEqual(signal.urgency, "high")
 
         asyncio.run(scenario())
 

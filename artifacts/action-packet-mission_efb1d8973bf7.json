@@ -1,0 +1,49 @@
+{
+  "mission_id": "mission_efb1d8973bf7",
+  "title": "export service: Enterprise customer reports failed exports after today's rollout.",
+  "severity": "high",
+  "confidence": 0.96,
+  "hypotheses": [
+    {
+      "id": "hyp_990ed8a6c4dd",
+      "title": "Rollout or configuration regression",
+      "rationale": "The signal mentions rollout, export, job failures, or sudden changes, so a recent change may be causal.",
+      "confidence": 0.9107999999999999,
+      "evidence_ids": [
+        "ev_49480a6eaf49",
+        "ev_df04be65e5d8",
+        "ev_feea2125e210",
+        "ev_69fe04ebf725"
+      ],
+      "status": "open"
+    },
+    {
+      "id": "hyp_2a90f05559a3",
+      "title": "Customer-impacting operational incident",
+      "rationale": "The signal may affect a customer or SLA and needs an action packet even if root cause is uncertain.",
+      "confidence": 0.9107999999999999,
+      "evidence_ids": [
+        "ev_7703c8d9be79",
+        "ev_0ab2a61c4c47",
+        "ev_6e0b1133e8a9",
+        "ev_5b149f309ef4",
+        "ev_3944570c0aca",
+        "ev_35f75afd70ce"
+      ],
+      "status": "open"
+    },
+    {
+      "id": "hyp_c4108c0049f9",
+      "title": "Follow-up evidence gap investigation",
+      "rationale": "New correlated signals arrived while the mission was running; spawn follow-up investigation over the expanded incident context.",
+      "confidence": 0.9107999999999999,
+      "evidence_ids": [
+        "ev_19054f24548c",
+        "ev_833771253b18"
+      ],
+      "status": "open"
+    }
+  ],
+  "evidence_count": 3,
+  "recommended_action": "Prepare rollback or disable the affected feature flag."
+}

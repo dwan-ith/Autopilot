@@ -12,14 +12,16 @@ into verified, policy-bounded actions.
 
 ## Product
 
-AUTOPILOT is connector-agnostic. A connector declares capabilities and safe
-actions. The runtime reasons over those capabilities rather than hardcoding one
-application workflow.
+AUTOPILOT is connector-agnostic. The product has a connector directory modeled
+as a catalog of external services. Each service declares auth mode, scopes,
+objects, event types, capabilities, and safe actions. The runtime reasons over
+those capabilities rather than hardcoding one application workflow.
 
-The MVP includes webhook, knowledge, artifact, and notification connectors. It
-can ingest arbitrary operational events, correlate related signals, run scoped
-operators, adapt the mission graph when new evidence arrives, and publish local
-artifacts or notifications.
+The MVP includes a demo-mode directory for services such as Gmail, Slack,
+Google Drive, Notion, Linear, Jira, Sentry, PagerDuty, Zendesk, Web Search, and
+Local Artifacts. Underneath that product layer, runtime adapters implement the
+currently available local capabilities: webhook ingestion, knowledge search,
+artifact writing, and notification fallback.
 
 ## Architecture
 

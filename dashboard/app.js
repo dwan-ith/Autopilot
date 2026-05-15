@@ -1,286 +1,252 @@
-/* AUTOPILOT Dashboard — app.js
-   Real-time mission control with SSE streaming and animated UI. */
-
 "use strict";
 
-// ── State ───────────────────────────────────────────────────────────────
 let selectedMissionId = null;
-let allMissions = [];
 let eventSource = null;
 
-// ── DOM helpers ─────────────────────────────────────────────────────────
 const $ = (id) => document.getElementById(id);
 
 async function fetchJson(url, options = {}) {
-  const res = await fetch(url, options);
-  if (!res.ok) throw new Error(`${res.status} ${await res.text()}`);
-  return res.json();
+  const response = await fetch(url, options);
+  if (!response.ok) throw new Error(`${response.status} ${await response.text()}`);
+  return response.json();
 }
 
-// ── Bootstrap ────────────────────────────────────────────────────────────
 async function init() {
   await renderConnectors();
-  await refresh();
   await loadProvider();
-  startSSE();
+  await refresh();
+  startSse();
 }
 
-// ── Provider badge ───────────────────────────────────────────────────────
 async function loadProvider() {
   try {
     const data = await fetchJson("/api/provider");
-    $("providerBadge").textContent = data.provider || "—";
+    $("providerBadge").textContent = data.provider || "heuristic";
   } catch {
     $("providerBadge").textContent = "heuristic";
   }
 }
 
-// ── Connectors ───────────────────────────────────────────────────────────
 async function renderConnectors() {
   const connectors = await fetchJson("/api/connectors");
-  $("connectors").innerHTML = connectors.map((c) => `
+  $("connectors").innerHTML = connectors.map((connector) => `
     <div class="connector">
-      <div class="connector-name">${c.name}</div>
-      <div class="meta">${c.description}</div>
-      <div class="cap-chips">
-        ${(c.capabilities || []).map((cap) => `<span class="cap-chip">${cap}</span>`).join("")}
+      <div class="connector-name">${esc(connector.name)}</div>
+      <div class="muted">${esc(connector.description)}</div>
+      <div class="chips">
+        ${(connector.capabilities || []).map((cap) => `<span>${esc(cap)}</span>`).join("")}
       </div>
+      <div class="muted">safe: ${(connector.safe_actions || []).map(esc).join(", ") || "none"}</div>
     </div>
-  `).join("") || `<p class="meta" style="padding:8px">No connectors registered.</p>`;
+  `).join("");
 }
 
-// ── Mission list ─────────────────────────────────────────────────────────
 function renderMissions(missions) {
-  allMissions = missions;
   $("missionCount").textContent = missions.length;
-
-  $("missions").innerHTML = missions.map((m) => `
-    <div class="mission-card${selectedMissionId === m.id ? " selected" : ""}" data-id="${m.id}">
-      <div class="mission-title">${escHtml(m.title)}</div>
-      <div class="badges">
-        ${pill(m.status, m.status)}
-        ${pill(m.severity, m.severity)}
-        ${pill(`${(+m.confidence * 100).toFixed(0)}%`, "")}
-      </div>
-      <div class="meta" style="margin-bottom:4px">${escHtml(m.summary || "").slice(0, 90)}${(m.summary || "").length > 90 ? "…" : ""}</div>
-      <div class="meta">replans ${m.replans} · ${relativeTime(m.updated_at)}</div>
-    </div>
-  `).join("") || `<p class="meta" style="padding:8px 4px">No missions yet.</p>`;
+  $("missions").innerHTML = missions.map((mission) => `
+    <button class="mission-card ${selectedMissionId === mission.id ? "selected" : ""}" data-id="${mission.id}">
+      <span class="mission-title">${esc(mission.title)}</span>
+      <span class="row">
+        ${badge(mission.status, mission.status)}
+        ${badge(mission.severity, mission.severity)}
+        ${badge(`${Math.round(Number(mission.confidence) * 100)}%`)}
+      </span>
+      <span class="muted">${esc(shorten(mission.summary || "", 110))}</span>
+      <span class="muted">replans ${mission.replans} | ${relativeTime(mission.updated_at)}</span>
+    </button>
+  `).join("") || `<p class="muted pad">No missions yet.</p>`;
 
   document.querySelectorAll(".mission-card").forEach((card) => {
     card.addEventListener("click", () => selectMission(card.dataset.id));
   });
 
-  // Auto-select first running mission or first mission
-  if (!selectedMissionId && missions.length > 0) {
-    const running = missions.find((m) => m.status === "running" || m.status === "queued");
-    selectMission((running || missions[0]).id);
-  } else if (selectedMissionId) {
-    // Re-select to refresh detail
-    selectMission(selectedMissionId, { silent: true });
-  }
-
-  // Update header status dot
-  const hasActive = missions.some((m) => m.status === "running" || m.status === "queued");
-  const dot = $("statusDot");
-  const label = $("statusLabel");
-  dot.className = "status-dot" + (hasActive ? " running" : missions.length ? " active" : "");
-  label.textContent = hasActive ? "running" : missions.length ? "ready" : "idle";
+  if (!selectedMissionId && missions.length) selectMission(missions[0].id);
+  updateRuntimeStatus(missions);
 }
 
-// ── Mission detail ────────────────────────────────────────────────────────
-async function selectMission(id, opts = {}) {
+async function selectMission(id) {
   selectedMissionId = id;
-
-  // Mark selected card
-  document.querySelectorAll(".mission-card").forEach((c) => {
-    c.classList.toggle("selected", c.dataset.id === id);
+  document.querySelectorAll(".mission-card").forEach((card) => {
+    card.classList.toggle("selected", card.dataset.id === id);
   });
 
-  let data;
-  try {
-    data = await fetchJson(`/api/missions/${id}`);
-  } catch {
-    return;
-  }
-
-  const m = data.mission;
-  const steps = data.steps || [];
-  const traces = data.traces || [];
-
-  $("selectedStatus").textContent = m.status;
-  $("selectedStatus").className = `status-pill ${m.status}`;
+  const data = await fetchJson(`/api/missions/${id}`);
+  const mission = data.mission;
+  $("selectedStatus").textContent = mission.status;
+  $("selectedStatus").className = `status-pill ${mission.status}`;
 
   $("missionDetail").innerHTML = `
-    <h3 style="font-size:15px;font-weight:800;margin-bottom:8px">${escHtml(m.title)}</h3>
-    <div class="badges" style="margin-bottom:10px">
-      ${pill(m.status, m.status)}
-      ${pill(m.severity, m.severity)}
-      ${pill(`confidence ${(m.confidence * 100).toFixed(0)}%`, "")}
-      ${pill(`replans ${m.replans}`, "")}
-      ${pill(`${m.signals?.length || 0} signals`, "")}
-    </div>
-    <p class="meta" style="margin-bottom:4px">${escHtml(m.summary || "")}</p>
-
-    ${m.signals?.length ? `
-      <div class="section-title">Signals</div>
-      ${m.signals.map((s) => `
-        <div class="signal-card">
-          <div class="card-title">${escHtml(s.source)} / <span style="color:var(--muted)">${escHtml(s.type)}</span></div>
-          <div class="card-body">${escHtml(s.summary)}</div>
-          ${s.entities?.length ? `<div class="meta" style="margin-top:4px">${s.entities.map(escHtml).join(" · ")}</div>` : ""}
-        </div>
-      `).join("")}
-    ` : ""}
-
-    ${steps.length ? `
-      <div class="section-title">Execution Graph</div>
-      <div class="timeline">
-        ${steps.map((s) => `
-          <div class="step ${s.status}">
-            <div style="display:flex;align-items:center;gap:8px;margin-bottom:4px">
-              <div class="step-name">${escHtml(s.name)}</div>
-              ${pill(s.status, s.status)}
-            </div>
-            <div class="step-role">${escHtml(s.role)}</div>
-            ${s.output_summary ? `<div class="step-output" style="margin-top:6px">${escHtml(s.output_summary)}</div>` : ""}
-          </div>
-        `).join("")}
+    <div class="mission-header">
+      <h3>${esc(mission.title)}</h3>
+      <div class="row">
+        ${badge(mission.status, mission.status)}
+        ${badge(mission.severity, mission.severity)}
+        ${badge(`confidence ${Math.round(mission.confidence * 100)}%`)}
+        ${badge(`${mission.signals.length} signals`)}
+        ${badge(`${mission.replans} replans`)}
       </div>
-    ` : ""}
+      <p class="muted">${esc(mission.summary)}</p>
+    </div>
 
-    ${m.hypotheses?.length ? `
-      <div class="section-title">Hypotheses</div>
-      ${m.hypotheses.map((h) => `
-        <div class="hyp-card">
-          <div style="display:flex;align-items:center;gap:8px;margin-bottom:4px">
-            <div class="card-title">${escHtml(h.title)}</div>
-            ${pill((h.confidence * 100).toFixed(0) + "%", "")}
-          </div>
-          <div class="card-body">${escHtml(h.rationale)}</div>
-          <div class="conf-bar-wrap"><div class="conf-bar" style="width:${Math.round(h.confidence * 100)}%"></div></div>
-        </div>
-      `).join("")}
-    ` : ""}
-
-    ${m.evidence?.length ? `
-      <div class="section-title">Evidence · ${m.evidence.length} item${m.evidence.length !== 1 ? "s" : ""}</div>
-      ${m.evidence.map((ev) => `
-        <div class="evidence-card">
-          <div style="display:flex;align-items:center;gap:8px;margin-bottom:4px">
-            <div class="card-title">${escHtml(ev.title)}</div>
-            ${pill((ev.confidence * 100).toFixed(0) + "%", "")}
-          </div>
-          <div class="card-body">${escHtml(ev.summary)}</div>
-          <div class="meta" style="margin-top:4px">${escHtml(ev.source)}${ev.url ? ` · <a href="${escHtml(ev.url)}" target="_blank" rel="noopener" style="color:var(--accent)">${escHtml(ev.url.replace(/^https?:\/\//, "").slice(0, 50))}</a>` : ""}</div>
-          <div class="conf-bar-wrap"><div class="conf-bar" style="width:${Math.round(ev.confidence * 100)}%"></div></div>
-        </div>
-      `).join("")}
-    ` : `<div class="section-title">Evidence</div><p class="meta" style="padding:4px 0">Collecting…</p>`}
-
-    ${m.actions?.length ? `
-      <div class="section-title">Actions Taken</div>
-      ${m.actions.map((a) => `
-        <div class="action-card">
-          <div style="display:flex;align-items:center;gap:8px;margin-bottom:4px">
-            <div class="card-title">${escHtml(a.action)}</div>
-            ${pill(a.status, a.status)}
-          </div>
-          <div class="card-body">${escHtml(a.summary)}</div>
-          ${a.artifact_path ? `<div class="meta" style="margin-top:4px;font-family:var(--mono);font-size:11px">${escHtml(a.artifact_path)}</div>` : ""}
-        </div>
-      `).join("")}
-    ` : ""}
+    ${section("Mission Graph", renderGraph(mission.graph || [], data.steps || []))}
+    ${section("Signals", renderSignals(mission.signals || []))}
+    ${section("Hypotheses", renderHypotheses(mission.hypotheses || []))}
+    ${section("Evidence", renderEvidence(mission.evidence || []))}
+    ${section("Policy", renderPolicy(mission.policy_decisions || []))}
+    ${section("Actions", renderActions(mission.actions || []))}
   `;
 
-  // Render trace in right panel
-  renderTraces(traces);
+  renderTraces(data.traces || []);
 }
 
-// ── Trace panel ──────────────────────────────────────────────────────────
+function renderGraph(graph, steps) {
+  const nodes = graph.length ? graph : steps.map((step) => ({
+    title: step.name,
+    kind: "operator",
+    status: step.status,
+    summary: step.output_summary || step.role,
+  }));
+  return `<div class="timeline">${nodes.map((node) => `
+    <article class="timeline-node ${node.status}">
+      <div class="node-top">
+        <strong>${esc(node.title)}</strong>
+        ${badge(node.kind || "operator")}
+        ${badge(node.status, node.status)}
+      </div>
+      <p>${esc(node.summary || "")}</p>
+    </article>
+  `).join("")}</div>`;
+}
+
+function renderSignals(signals) {
+  return signals.map((signal) => card(
+    `${signal.source} / ${signal.type}`,
+    signal.summary,
+    signal.entities.join(", ")
+  )).join("") || empty("No signals.");
+}
+
+function renderHypotheses(hypotheses) {
+  return hypotheses.map((hypothesis) => card(
+    `${hypothesis.title} (${Math.round(hypothesis.confidence * 100)}%)`,
+    hypothesis.rationale,
+    progress(hypothesis.confidence)
+  )).join("") || empty("No hypotheses.");
+}
+
+function renderEvidence(evidence) {
+  return evidence.map((item) => card(
+    `${item.title} (${Math.round(item.confidence * 100)}%)`,
+    item.summary,
+    `${esc(item.source)}${item.url ? ` | ${esc(item.url)}` : ""}${progress(item.confidence)}`
+  )).join("") || empty("No evidence.");
+}
+
+function renderPolicy(decisions) {
+  return decisions.map((decision) => card(
+    `${decision.allowed ? "allowed" : "blocked"}: ${decision.connector}.${decision.action}`,
+    decision.reason,
+    `required ${decision.confidence_required.toFixed(2)} | observed ${decision.confidence_observed.toFixed(2)}`
+  )).join("") || empty("No policy decisions yet.");
+}
+
+function renderActions(actions) {
+  return actions.map((action) => card(
+    `${action.connector}.${action.action}`,
+    action.summary,
+    esc(action.artifact_path || action.status)
+  )).join("") || empty("No actions yet.");
+}
+
 function renderTraces(traces) {
   $("traceCount").textContent = traces.length;
-  $("traceList").innerHTML = traces.slice(0, 30).map((t) => `
-    <div class="trace-item ${t.status}">
-      <span style="color:var(--text-2)">${escHtml(t.name)}</span>
-      <span style="opacity:0.5"> · ${t.status}</span>
-      <span style="opacity:0.35;float:right">${shortTime(t.created_at)}</span>
+  $("traceList").innerHTML = traces.slice(0, 40).map((trace) => `
+    <div class="trace-item ${trace.status}">
+      <span>${esc(trace.name)}</span>
+      <span class="muted">${esc(trace.status)} | ${shortTime(trace.created_at)}</span>
     </div>
-  `).join("") || `<p class="meta" style="padding:4px 8px">No traces yet.</p>`;
+  `).join("") || empty("No traces.");
 }
 
-// ── SSE real-time updates ────────────────────────────────────────────────
-function startSSE() {
+function startSse() {
   if (eventSource) eventSource.close();
   eventSource = new EventSource("/api/events");
-  eventSource.onmessage = (ev) => {
-    try {
-      const data = JSON.parse(ev.data);
-      if (data.missions) renderMissions(data.missions);
-      if (data.traces) renderTraces(data.traces);
-    } catch { /* ignore parse errors */ }
+  eventSource.onmessage = (event) => {
+    const payload = JSON.parse(event.data);
+    if (payload.missions) renderMissions(payload.missions);
+    if (selectedMissionId) selectMission(selectedMissionId).catch(() => {});
   };
-  eventSource.onerror = () => {
-    // Reconnect after 3s
-    setTimeout(startSSE, 3000);
-  };
+  eventSource.onerror = () => setTimeout(startSse, 2500);
 }
 
-// ── Full refresh ─────────────────────────────────────────────────────────
 async function refresh() {
-  try {
-    const missions = await fetchJson("/api/missions");
-    renderMissions(missions);
-  } catch (err) {
-    console.error("Refresh failed:", err);
-  }
+  const missions = await fetchJson("/api/missions");
+  renderMissions(missions);
 }
 
-// ── Demo button ───────────────────────────────────────────────────────────
 $("demoBtn").addEventListener("click", async () => {
   $("demoBtn").disabled = true;
-  $("demoBtn").textContent = "Firing…";
   try {
     await fetchJson("/demo/fire", { method: "POST" });
     await refresh();
-  } catch (err) {
-    alert("Demo failed: " + err.message);
+  } catch (error) {
+    alert(`Demo failed: ${error.message}`);
   } finally {
-    setTimeout(() => {
-      $("demoBtn").disabled = false;
-      $("demoBtn").innerHTML = `<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polygon points="5 3 19 12 5 21 5 3"/></svg> Run Demo`;
-    }, 2000);
+    setTimeout(() => { $("demoBtn").disabled = false; }, 1200);
   }
 });
 
 $("refreshBtn").addEventListener("click", refresh);
 
-// ── Helpers ──────────────────────────────────────────────────────────────
-function escHtml(str = "") {
-  return String(str)
+function updateRuntimeStatus(missions) {
+  const active = missions.some((mission) => ["queued", "running", "waiting"].includes(mission.status));
+  $("statusLabel").textContent = active ? "running" : missions.length ? "ready" : "idle";
+  $("statusDot").className = `status-dot ${active ? "running" : missions.length ? "ready" : ""}`;
+}
+
+function section(title, body) {
+  return `<section class="detail-section"><h4>${title}</h4>${body}</section>`;
+}
+
+function card(title, body, footer = "") {
+  return `<article class="info-card"><strong>${esc(title)}</strong><p>${esc(body)}</p>${footer ? `<div class="muted">${footer}</div>` : ""}</article>`;
+}
+
+function badge(text, cls = "") {
+  return `<span class="badge ${esc(cls)}">${esc(String(text))}</span>`;
+}
+
+function progress(value) {
+  const width = Math.max(0, Math.min(100, Math.round(Number(value) * 100)));
+  return `<div class="bar"><span style="width:${width}%"></span></div>`;
+}
+
+function empty(text) {
+  return `<p class="muted pad">${esc(text)}</p>`;
+}
+
+function esc(value = "") {
+  return String(value)
     .replace(/&/g, "&amp;")
     .replace(/</g, "&lt;")
     .replace(/>/g, "&gt;")
     .replace(/"/g, "&quot;");
 }
 
-function pill(text, cls = "") {
-  return `<span class="badge ${escHtml(cls)}">${escHtml(String(text))}</span>`;
+function shorten(text, max) {
+  return text.length > max ? `${text.slice(0, max - 3)}...` : text;
 }
 
 function relativeTime(iso) {
-  if (!iso) return "—";
-  const diff = Math.floor((Date.now() - new Date(iso).getTime()) / 1000);
-  if (diff < 60) return `${diff}s ago`;
-  if (diff < 3600) return `${Math.floor(diff / 60)}m ago`;
-  return `${Math.floor(diff / 3600)}h ago`;
+  if (!iso) return "unknown";
+  const seconds = Math.max(0, Math.floor((Date.now() - new Date(iso).getTime()) / 1000));
+  if (seconds < 60) return `${seconds}s ago`;
+  if (seconds < 3600) return `${Math.floor(seconds / 60)}m ago`;
+  return `${Math.floor(seconds / 3600)}h ago`;
 }
 
 function shortTime(iso) {
-  if (!iso) return "";
-  try { return new Date(iso).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", second: "2-digit" }); }
-  catch { return ""; }
+  return iso ? new Date(iso).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", second: "2-digit" }) : "";
 }
 
-// ── Start ────────────────────────────────────────────────────────────────
 init();

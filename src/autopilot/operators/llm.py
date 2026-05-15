@@ -47,6 +47,10 @@ _provider_cache: dict[str, Any] | None = ...  # sentinel
 def _detect_provider() -> dict[str, Any] | None:
     """Return the first provider whose API key is present in the env."""
     global _provider_cache
+    if os.getenv("AUTOPILOT_DISABLE_LLM", "").lower() in {"1", "true", "yes"}:
+        _provider_cache = None
+        log.info("LLM disabled by AUTOPILOT_DISABLE_LLM; using heuristic operators")
+        return None
     if _provider_cache is not ...:
         return _provider_cache
     for cfg in PROVIDERS:
@@ -56,7 +60,7 @@ def _detect_provider() -> dict[str, Any] | None:
             log.info("LLM provider: %s  model: %s", cfg["name"], cfg["default_model"])
             return _provider_cache
     _provider_cache = None
-    log.warning("No LLM provider configured — operators will use heuristic fallback")
+    log.warning("No LLM provider configured; operators will use heuristic fallback")
     return None
 
 
@@ -112,7 +116,7 @@ async def reason(
             resp.raise_for_status()
             data = resp.json()
             text = data["choices"][0]["message"]["content"]
-            log.debug("LLM response (%s): %.200s…", provider["name"], text)
+            log.debug("LLM response (%s): %.200s...", provider["name"], text)
             return text
     except httpx.HTTPStatusError as exc:
         log.error("LLM %s HTTP %s: %s", provider["name"], exc.response.status_code, exc.response.text[:400])

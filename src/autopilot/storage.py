@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import sqlite3
+import threading
 from contextlib import closing
 from datetime import datetime, timezone
 from pathlib import Path
@@ -25,17 +26,22 @@ def _json_default(value: Any) -> str:
 class Store:
     def __init__(self, path: Path = DB_PATH):
         self.path = path
+        self._lock = threading.RLock()
         self.path.parent.mkdir(parents=True, exist_ok=True)
         ARTIFACT_DIR.mkdir(parents=True, exist_ok=True)
         self.init()
 
     def connect(self) -> sqlite3.Connection:
-        conn = sqlite3.connect(self.path, check_same_thread=False)
+        conn = sqlite3.connect(self.path, check_same_thread=False, timeout=30)
         conn.row_factory = sqlite3.Row
+        conn.execute("pragma busy_timeout=30000")
+        conn.execute("pragma foreign_keys=on")
         return conn
 
     def init(self) -> None:
-        with closing(self.connect()) as conn, conn:
+        with self._lock, closing(self.connect()) as conn, conn:
+            conn.execute("pragma journal_mode=wal")
+            conn.execute("pragma synchronous=normal")
             conn.executescript(
                 """
                 create table if not exists missions (
@@ -94,7 +100,7 @@ class Store:
             )
 
     def save_signal(self, signal: Signal, mission_id: str | None = None) -> None:
-        with closing(self.connect()) as conn, conn:
+        with self._lock, closing(self.connect()) as conn, conn:
             conn.execute(
                 """
                 insert or replace into signals
@@ -115,7 +121,7 @@ class Store:
             )
 
     def create_mission(self, mission: Mission) -> None:
-        with closing(self.connect()) as conn, conn:
+        with self._lock, closing(self.connect()) as conn, conn:
             conn.execute(
                 """
                 insert into missions
@@ -128,23 +134,33 @@ class Store:
             self.save_signal(signal, mission.id)
 
     def update_mission(self, mission: Mission) -> None:
-        existing = self.get_mission(mission.id)
-        if existing:
-            seen = {signal.id for signal in mission.signals}
-            mission.signals.extend(signal for signal in existing.signals if signal.id not in seen)
-        mission.updated_at = utc_now()
-        with closing(self.connect()) as conn, conn:
-            conn.execute(
-                """
-                update missions
-                set status=?, title=?, severity=?, summary=?, confidence=?, replans=?, payload=?,
-                    created_at=?, updated_at=?, completed_at=?
-                where id=?
-                """,
-                self._mission_row(mission)[1:] + (mission.id,),
-            )
-        for signal in mission.signals:
-            self.save_signal(signal, mission.id)
+        with self._lock:
+            existing = self.get_mission(mission.id)
+            if existing:
+                seen_signals = {signal.id for signal in mission.signals}
+                mission.signals.extend(signal for signal in existing.signals if signal.id not in seen_signals)
+
+                seen_graph = {node.id for node in mission.graph}
+                mission.graph.extend(node for node in existing.graph if node.id not in seen_graph)
+
+                seen_policies = {decision.id for decision in mission.policy_decisions}
+                mission.policy_decisions.extend(
+                    decision for decision in existing.policy_decisions if decision.id not in seen_policies
+                )
+            mission.updated_at = utc_now()
+            with closing(self.connect()) as conn, conn:
+                conn.execute(
+                    """
+                    update missions
+                    set status=?, title=?, severity=?, summary=?, confidence=?, replans=?, payload=?,
+                        created_at=?, updated_at=?, completed_at=?
+                    where id=?
+                    """,
+                    self._mission_row(mission)[1:] + (mission.id,),
+                )
+            for signal in mission.signals:
+                self.save_signal(signal, mission.id)
+            return
 
     def _mission_row(self, mission: Mission) -> tuple[Any, ...]:
         return (
@@ -162,14 +178,14 @@ class Store:
         )
 
     def get_mission(self, mission_id: str) -> Mission | None:
-        with closing(self.connect()) as conn, conn:
+        with self._lock, closing(self.connect()) as conn, conn:
             row = conn.execute("select payload from missions where id=?", (mission_id,)).fetchone()
         if not row:
             return None
         return Mission.model_validate_json(row["payload"])
 
     def list_missions(self, limit: int = 50) -> list[dict[str, Any]]:
-        with closing(self.connect()) as conn, conn:
+        with self._lock, closing(self.connect()) as conn, conn:
             rows = conn.execute(
                 """
                 select id, status, title, severity, summary, confidence, replans, created_at, updated_at, completed_at
@@ -180,7 +196,7 @@ class Store:
         return [dict(row) for row in rows]
 
     def active_missions(self) -> list[Mission]:
-        with closing(self.connect()) as conn, conn:
+        with self._lock, closing(self.connect()) as conn, conn:
             rows = conn.execute(
                 "select payload from missions where status in (?, ?, ?) order by datetime(updated_at) desc",
                 (MissionStatus.QUEUED.value, MissionStatus.RUNNING.value, MissionStatus.WAITING.value),
@@ -188,7 +204,7 @@ class Store:
         return [Mission.model_validate_json(row["payload"]) for row in rows]
 
     def add_step(self, step: OperatorStep) -> None:
-        with closing(self.connect()) as conn, conn:
+        with self._lock, closing(self.connect()) as conn, conn:
             conn.execute(
                 """
                 insert or replace into steps
@@ -211,7 +227,7 @@ class Store:
             )
 
     def list_steps(self, mission_id: str) -> list[dict[str, Any]]:
-        with closing(self.connect()) as conn, conn:
+        with self._lock, closing(self.connect()) as conn, conn:
             rows = conn.execute(
                 "select * from steps where mission_id=? order by created_at, id",
                 (mission_id,),
@@ -219,7 +235,7 @@ class Store:
         return [dict(row) for row in rows]
 
     def trace(self, mission_id: str | None, name: str, status: str, payload: dict[str, Any], parent_step_id: str | None = None) -> None:
-        with closing(self.connect()) as conn, conn:
+        with self._lock, closing(self.connect()) as conn, conn:
             conn.execute(
                 """
                 insert into trace_events (mission_id, parent_step_id, name, status, payload, created_at)
@@ -236,7 +252,7 @@ class Store:
             )
 
     def list_traces(self, mission_id: str | None = None, limit: int = 100) -> list[dict[str, Any]]:
-        with closing(self.connect()) as conn, conn:
+        with self._lock, closing(self.connect()) as conn, conn:
             if mission_id:
                 rows = conn.execute(
                     "select * from trace_events where mission_id=? order by id desc limit ?",
@@ -247,14 +263,14 @@ class Store:
         return [dict(row) for row in rows]
 
     def remember(self, key: str, value: str) -> None:
-        with closing(self.connect()) as conn, conn:
+        with self._lock, closing(self.connect()) as conn, conn:
             conn.execute(
                 "insert into memory_items (key, value, created_at) values (?, ?, ?)",
                 (key, value, datetime.now(timezone.utc).isoformat()),
             )
 
     def recall(self, key_like: str, limit: int = 5) -> list[str]:
-        with closing(self.connect()) as conn, conn:
+        with self._lock, closing(self.connect()) as conn, conn:
             rows = conn.execute(
                 "select value from memory_items where key like ? order by id desc limit ?",
                 (f"%{key_like}%", limit),

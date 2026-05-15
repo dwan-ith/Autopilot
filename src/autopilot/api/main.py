@@ -3,7 +3,6 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
-import logging.config
 from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Any
@@ -75,7 +74,7 @@ async def connectors() -> list[dict[str, Any]]:
 @app.post("/webhooks/{connector_name}")
 async def webhook(connector_name: str, request: Request) -> dict[str, Any]:
     payload = await request.json()
-    connector = registry.get(connector_name) if connector_name in {m.name for m in registry.manifests()} else registry.get("webhook")
+    connector = registry.get(connector_name) if registry.has_name(connector_name) else registry.get("webhook")
     signal = await connector.normalize_event(payload)
     signal.source = connector_name
     store.trace(None, "webhook.received", "complete", {"connector": connector_name, "payload": payload})

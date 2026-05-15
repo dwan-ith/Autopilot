@@ -38,13 +38,21 @@ class StepStatus(str, Enum):
     FAILED = "failed"
 
 
+class GraphNodeKind(str, Enum):
+    SIGNAL = "signal"
+    OPERATOR = "operator"
+    REPLAN = "replan"
+    ACTION = "action"
+    POLICY = "policy"
+
+
 class ConnectorManifest(BaseModel):
     name: str
     description: str
     capabilities: list[Capability]
     event_types: list[str] = Field(default_factory=list)
     safe_actions: list[str] = Field(default_factory=list)
-    reliability_score: float = 0.9
+    reliability_score: float = Field(default=0.9, ge=0.0, le=1.0)
     auth_required: bool = False
 
 
@@ -63,7 +71,7 @@ class Hypothesis(BaseModel):
     id: str = Field(default_factory=lambda: new_id("hyp"))
     title: str
     rationale: str
-    confidence: float = 0.35
+    confidence: float = Field(default=0.35, ge=0.0, le=1.0)
     evidence_ids: list[str] = Field(default_factory=list)
     status: str = "open"
 
@@ -74,7 +82,7 @@ class Evidence(BaseModel):
     title: str
     summary: str
     url: str | None = None
-    confidence: float = 0.5
+    confidence: float = Field(default=0.5, ge=0.0, le=1.0)
     metadata: dict[str, Any] = Field(default_factory=dict)
 
 
@@ -86,6 +94,30 @@ class ActionResult(BaseModel):
     summary: str
     artifact_path: str | None = None
     metadata: dict[str, Any] = Field(default_factory=dict)
+
+
+class PolicyDecision(BaseModel):
+    id: str = Field(default_factory=lambda: new_id("policy"))
+    connector: str
+    action: str
+    allowed: bool
+    reason: str
+    confidence_required: float = Field(default=0.0, ge=0.0, le=1.0)
+    confidence_observed: float = Field(default=0.0, ge=0.0, le=1.0)
+    created_at: datetime = Field(default_factory=utc_now)
+
+
+class MissionGraphNode(BaseModel):
+    id: str = Field(default_factory=lambda: new_id("node"))
+    kind: GraphNodeKind
+    title: str
+    status: StepStatus = StepStatus.STARTED
+    parent_ids: list[str] = Field(default_factory=list)
+    summary: str = ""
+    ref_id: str | None = None
+    metadata: dict[str, Any] = Field(default_factory=dict)
+    created_at: datetime = Field(default_factory=utc_now)
+    completed_at: datetime | None = None
 
 
 class OperatorStep(BaseModel):
@@ -112,7 +144,9 @@ class Mission(BaseModel):
     hypotheses: list[Hypothesis] = Field(default_factory=list)
     evidence: list[Evidence] = Field(default_factory=list)
     actions: list[ActionResult] = Field(default_factory=list)
-    confidence: float = 0.0
+    policy_decisions: list[PolicyDecision] = Field(default_factory=list)
+    graph: list[MissionGraphNode] = Field(default_factory=list)
+    confidence: float = Field(default=0.0, ge=0.0, le=1.0)
     replans: int = 0
     created_at: datetime = Field(default_factory=utc_now)
     updated_at: datetime = Field(default_factory=utc_now)

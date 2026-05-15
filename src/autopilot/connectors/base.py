@@ -45,6 +45,9 @@ class ConnectorRegistry:
     def get(self, name: str) -> Connector:
         return self._connectors[name]
 
+    def has_name(self, name: str) -> bool:
+        return name in self._connectors
+
     def manifests(self) -> list[ConnectorManifest]:
         return [connector.manifest for connector in self._connectors.values()]
 

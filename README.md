@@ -60,3 +60,32 @@ The included demo uses generic webhook, knowledge, artifact, and notification co
 $env:PYTHONPATH="src"
 python -m unittest discover -s tests -v
 ```
+
+## Environment & Configuration
+
+Create a `.env` file at the project root (you can copy `.env.example`) and populate required values. Key environment variables:
+
+- `GITHUB_TOKEN` — Personal Access Token or GitHub App installation token (needed for `GitHubAgent`).
+- `GITHUB_API_URL` — GitHub API base URL (defaults to `https://api.github.com`).
+- `REDIS_URL` — Optional Redis URL for hot caching (e.g. `redis://localhost:6379/0`).
+- `POSTGRES_DSN` — Optional Postgres DSN for durable storage (future adapter).
+- `SLACK_BOT_TOKEN`, `TEAMS_WEBHOOK_URL` — Optional notification connectors.
+
+Quick start (Windows PowerShell):
+
+```powershell
+cd C:\path\to\autopilot
+python -m venv venv
+.\venv\Scripts\Activate.ps1
+pip install -r requirements.txt
+# copy example env
+copy .env.example .env
+# edit .env to add tokens
+$env:PYTHONPATH="src"
+uvicorn autopilot.api.main:app --reload --port 8080
+```
+
+Open the dashboard at `http://127.0.0.1:8080` and click **Run Demo**.
+
+CI / automated runs: add `GITHUB_TOKEN` and other secrets to your CI environment (GitHub Actions secrets, etc.).
+

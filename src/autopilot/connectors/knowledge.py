@@ -1,8 +1,8 @@
+
 from __future__ import annotations
 
-import os
-
 import httpx
+from autopilot.config import settings
 
 from autopilot.connectors.base import Connector
 from autopilot.models import Capability, ConnectorManifest, Evidence
@@ -56,7 +56,7 @@ class KnowledgeConnector(Connector):
                     )
                 )
 
-        tavily_key = os.getenv("TAVILY_API_KEY")
+        tavily_key = settings.TAVILY_API_KEY
         if tavily_key:
             evidence.extend(await self._tavily_search(query, tavily_key))
 

@@ -10,15 +10,27 @@ from autopilot.models import Mission, MissionStatus, OperatorStep, Signal, StepS
 from autopilot.operators import OperatorSuite
 from autopilot.storage import Store
 from autopilot.tracing import TraceSink
+from autopilot.orchestrator import OrchestratorAgent
+from autopilot.connectors.maas import MAASConnectorRegistry
+from autopilot.models import AgentTask, ActionRecord
+import logging
+
+logger = logging.getLogger(__name__)
 
 
 class RuntimeKernel:
-    def __init__(self, store: Store, registry: ConnectorRegistry):
+    def __init__(self, store: Store, registry: ConnectorRegistry, maas_registry: MAASConnectorRegistry | None = None):
         self.store = store
         self.registry = registry
         self.operators = OperatorSuite(registry)
         self.tracer = TraceSink(store)
         self._tasks: dict[str, asyncio.Task] = {}
+        self.agent_registry = maas_registry
+        self._agent_queue: asyncio.Queue[AgentTask] = asyncio.Queue()
+        self.orchestrator: OrchestratorAgent | None = None
+        if maas_registry is not None:
+            self.orchestrator = OrchestratorAgent(maas_registry, store, self._agent_queue)
+        self._agent_worker_task: asyncio.Task | None = None
 
     async def ingest(self, signal: Signal) -> Mission:
         self.store.save_signal(signal)
@@ -41,7 +53,77 @@ class RuntimeKernel:
             self.tracer.emit(mission.id, "mission.created", "complete", {"signal": signal.model_dump()})
 
         self.schedule(mission.id)
+        # Route MAAS agent tasks if orchestrator present
+        if self.orchestrator:
+            tasks = self.orchestrator.route(signal, mission)
+            await self.orchestrator.dispatch(tasks)
         return mission
+
+    def start_agent_workers(self, num_workers: int = 1) -> None:
+        if not self.orchestrator:
+            return
+        if self._agent_worker_task and not self._agent_worker_task.done():
+            return
+        self._agent_worker_task = asyncio.create_task(self._agent_worker())
+
+    async def _agent_worker(self) -> None:
+        if not self.orchestrator or not self.agent_registry:
+            return
+        while True:
+            task: AgentTask = await self._agent_queue.get()
+            try:
+                # update status -> running
+                task.status = "running"
+                task.updated_at = utc_now()
+                try:
+                    self.store.save_agent_task(task)
+                except Exception:
+                    logger.exception("Failed to persist agent task running status")
+
+                allowed = self.orchestrator.enforce_policy(task)
+                if not allowed:
+                    task.status = "failed"
+                    task.updated_at = utc_now()
+                    self.store.save_agent_task(task)
+                    self.tracer.emit(task.mission_id, "agent.task.denied", "failed", {"task": task.model_dump()})
+                    continue
+
+                agent = self.agent_registry.get(task.agent_type)
+                if not agent:
+                    task.status = "failed"
+                    task.updated_at = utc_now()
+                    self.store.save_agent_task(task)
+                    self.tracer.emit(task.mission_id, "agent.task.missing", "failed", {"task": task.model_dump()})
+                    continue
+
+                # invoke agent
+                record: ActionRecord = await agent.handle(task)
+                # attach mission_id into payload for querying
+                try:
+                    if isinstance(record.payload, dict):
+                        record.payload.setdefault("mission_id", task.mission_id)
+                except Exception:
+                    pass
+                # persist record
+                try:
+                    self.store.save_action_record(record)
+                except Exception:
+                    logger.exception("Failed to persist action record %s", record.id)
+
+                task.status = "done"
+                task.updated_at = utc_now()
+                self.store.save_agent_task(task)
+                self.tracer.emit(task.mission_id, "agent.task.complete", "complete", {"task": task.model_dump(), "record": record.model_dump()})
+            except Exception as exc:
+                logger.exception("Error running agent task: %s", exc)
+                task.status = "failed"
+                task.updated_at = utc_now()
+                try:
+                    self.store.save_agent_task(task)
+                except Exception:
+                    pass
+            finally:
+                self._agent_queue.task_done()
 
     def schedule(self, mission_id: str) -> None:
         task = self._tasks.get(mission_id)

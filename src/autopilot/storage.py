@@ -8,6 +8,7 @@ from pathlib import Path
 from typing import Any
 
 from autopilot.models import Mission, MissionStatus, OperatorStep, Signal, utc_now
+from autopilot.models import AgentTask, ActionRecord
 
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -88,6 +89,27 @@ class Store:
                     id integer primary key autoincrement,
                     key text not null,
                     value text not null,
+                    created_at text not null
+                );
+                create table if not exists agent_tasks (
+                    id text primary key,
+                    agent_type text not null,
+                    mission_id text not null,
+                    signal_id text,
+                    priority integer,
+                    payload text not null,
+                    status text not null,
+                    created_at text not null,
+                    updated_at text not null
+                );
+                create table if not exists action_records (
+                    id text primary key,
+                    agent_type text not null,
+                    platform text,
+                    action_type text not null,
+                    payload text not null,
+                    result text not null,
+                    trace_id text,
                     created_at text not null
                 );
                 """
@@ -209,6 +231,63 @@ class Store:
                     step.completed_at.isoformat() if step.completed_at else None,
                 ),
             )
+
+    def save_agent_task(self, task: AgentTask) -> None:
+        with closing(self.connect()) as conn, conn:
+            conn.execute(
+                """
+                insert or replace into agent_tasks
+                (id, agent_type, mission_id, signal_id, priority, payload, status, created_at, updated_at)
+                values (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    task.id,
+                    task.agent_type.value,
+                    task.mission_id,
+                    task.signal_id,
+                    task.priority,
+                    task.model_dump_json(),
+                    task.status,
+                    task.created_at.isoformat(),
+                    task.updated_at.isoformat(),
+                ),
+            )
+
+    def get_agent_tasks(self, mission_id: str) -> list[AgentTask]:
+        with closing(self.connect()) as conn, conn:
+            rows = conn.execute(
+                "select payload from agent_tasks where mission_id=? order by datetime(created_at) desc",
+                (mission_id,),
+            ).fetchall()
+        return [AgentTask.model_validate_json(row["payload"]) for row in rows]
+
+    def save_action_record(self, record: ActionRecord) -> None:
+        with closing(self.connect()) as conn, conn:
+            conn.execute(
+                """
+                insert or replace into action_records
+                (id, agent_type, platform, action_type, payload, result, trace_id, created_at)
+                values (?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    record.id,
+                    record.agent_type.value,
+                    record.platform,
+                    record.action_type,
+                    record.model_dump_json(),
+                    record.result and json.dumps(record.result, default=_json_default) or json.dumps({}),
+                    record.trace_id,
+                    record.created_at.isoformat(),
+                ),
+            )
+
+    def get_action_records(self, mission_id: str) -> list[ActionRecord]:
+        with closing(self.connect()) as conn, conn:
+            rows = conn.execute(
+                "select payload from action_records where payload like ? order by datetime(created_at) desc",
+                (f"%{mission_id}%",),
+            ).fetchall()
+        return [ActionRecord.model_validate_json(row["payload"]) for row in rows]
 
     def list_steps(self, mission_id: str) -> list[dict[str, Any]]:
         with closing(self.connect()) as conn, conn:

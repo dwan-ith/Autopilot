@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import asyncio
 import json
+import hmac
+import hashlib
 from pathlib import Path
 from typing import Any
 
@@ -9,15 +11,18 @@ from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import FileResponse, HTMLResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 
-from autopilot.connectors import default_registry
+from autopilot.connectors import default_registry, default_maas_registry
 from autopilot.kernel import RuntimeKernel
 from autopilot.models import Signal, WebhookSignalRequest
 from autopilot.storage import ARTIFACT_DIR, ROOT, Store
+from autopilot.models import AgentType
+from autopilot.config import settings
 
 
 store = Store()
 registry = default_registry()
-runtime = RuntimeKernel(store, registry)
+maas = default_maas_registry(store)
+runtime = RuntimeKernel(store, registry, maas)
 
 app = FastAPI(
     title="AUTOPILOT",
@@ -33,6 +38,8 @@ if dashboard_dir.exists():
 @app.on_event("startup")
 async def startup() -> None:
     runtime.resume_active()
+    # start MAAS agent workers
+    runtime.start_agent_workers()
 
 
 @app.get("/", response_class=HTMLResponse)
@@ -53,9 +60,36 @@ async def connectors() -> list[dict[str, Any]]:
     return [manifest.model_dump() for manifest in registry.manifests()]
 
 
+@app.get("/api/agents")
+async def agents() -> list[dict[str, Any]]:
+    # list registered MAAS agents and health
+    agents = []
+    if maas:
+        for agent in maas.agents():
+            agents.append({"agent_type": agent.agent_type.value, "healthy": await agent.health_check()})
+    return agents
+
+
 @app.post("/webhooks/{connector_name}")
 async def webhook(connector_name: str, request: Request) -> dict[str, Any]:
-    payload = await request.json()
+    # read raw body for signature verification
+    body = await request.body()
+
+    # If GitHub webhook secret configured, verify signature header
+    if connector_name.lower() == "github" and settings.GITHUB_WEBHOOK_SECRET:
+        sig_header = request.headers.get("x-hub-signature-256")
+        if not sig_header:
+            raise HTTPException(status_code=401, detail="Missing signature header")
+        computed = hmac.new(settings.GITHUB_WEBHOOK_SECRET.encode(), body, hashlib.sha256).hexdigest()
+        expected = f"sha256={computed}"
+        if not hmac.compare_digest(expected, sig_header):
+            raise HTTPException(status_code=401, detail="Invalid signature")
+
+    try:
+        payload = json.loads(body.decode("utf-8"))
+    except Exception:
+        raise HTTPException(status_code=400, detail="Invalid JSON payload")
+
     connector = registry.get(connector_name) if connector_name in {m.name for m in registry.manifests()} else registry.get("webhook")
     signal = await connector.normalize_event(payload)
     signal.source = connector_name
@@ -73,9 +107,16 @@ async def create_signal(signal_request: WebhookSignalRequest) -> dict[str, Any]:
         entities=signal_request.entities,
         urgency=signal_request.urgency,
         payload=signal_request.payload,
+        source_platform=signal_request.source_platform,
+        raw_payload=signal_request.raw_payload,
     )
     mission = await runtime.ingest(signal)
     return {"accepted": True, "mission_id": mission.id, "signal_id": signal.id}
+
+
+@app.get("/api/missions/{mission_id}/actions")
+async def mission_actions(mission_id: str) -> list[dict[str, Any]]:
+    return [rec.model_dump() for rec in store.get_action_records(mission_id)]
 
 
 @app.post("/demo/fire")

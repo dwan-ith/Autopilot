@@ -24,6 +24,17 @@ class Capability(str, Enum):
     NOTIFY = "notify"
 
 
+class AgentType(str, Enum):
+    ORCHESTRATOR = "orchestrator"
+    GITHUB = "github"
+    PROJECT_MGMT = "project_mgmt"
+    COMMUNICATION = "communication"
+    CLOUD_INFRA = "cloud_infra"
+    DOCS = "docs"
+    ANALYTICS = "analytics"
+    SECURITY_AUDIT = "security_audit"
+
+
 class MissionStatus(str, Enum):
     QUEUED = "queued"
     RUNNING = "running"
@@ -57,6 +68,8 @@ class Signal(BaseModel):
     urgency: str = "medium"
     payload: dict[str, Any] = Field(default_factory=dict)
     received_at: datetime = Field(default_factory=utc_now)
+    source_platform: str | None = None
+    raw_payload: dict[str, Any] = Field(default_factory=dict)
 
 
 class Hypothesis(BaseModel):
@@ -86,6 +99,29 @@ class ActionResult(BaseModel):
     summary: str
     artifact_path: str | None = None
     metadata: dict[str, Any] = Field(default_factory=dict)
+
+
+class AgentTask(BaseModel):
+    id: str = Field(default_factory=lambda: new_id("task"))
+    agent_type: AgentType
+    mission_id: str
+    signal_id: str | None = None
+    priority: int = 50
+    payload: dict[str, Any] = Field(default_factory=dict)
+    status: str = "pending"
+    created_at: datetime = Field(default_factory=utc_now)
+    updated_at: datetime = Field(default_factory=utc_now)
+
+
+class ActionRecord(BaseModel):
+    id: str = Field(default_factory=lambda: new_id("arec"))
+    agent_type: AgentType
+    platform: str | None = None
+    action_type: str
+    payload: dict[str, Any] = Field(default_factory=dict)
+    result: dict[str, Any] = Field(default_factory=dict)
+    trace_id: str | None = None
+    created_at: datetime = Field(default_factory=utc_now)
 
 
 class OperatorStep(BaseModel):
@@ -118,6 +154,8 @@ class Mission(BaseModel):
     updated_at: datetime = Field(default_factory=utc_now)
     completed_at: datetime | None = None
     memory_notes: list[str] = Field(default_factory=list)
+    assigned_agents: list[AgentType] = Field(default_factory=list)
+    policy_flags: dict[str, Any] = Field(default_factory=dict)
 
 
 class WebhookSignalRequest(BaseModel):
@@ -127,3 +165,5 @@ class WebhookSignalRequest(BaseModel):
     entities: list[str] = Field(default_factory=list)
     urgency: str = "medium"
     payload: dict[str, Any] = Field(default_factory=dict)
+    source_platform: str | None = None
+    raw_payload: dict[str, Any] = Field(default_factory=dict)

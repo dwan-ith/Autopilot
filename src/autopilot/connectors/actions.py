@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import json
-import os
 from pathlib import Path
 
 import httpx
@@ -9,6 +8,7 @@ import httpx
 from autopilot.connectors.base import Connector
 from autopilot.models import ActionResult, Capability, ConnectorManifest
 from autopilot.storage import ARTIFACT_DIR
+from autopilot.config import settings
 
 
 class ArtifactConnector(Connector):
@@ -60,7 +60,7 @@ class NotificationConnector(Connector):
     )
 
     async def action(self, name: str, payload: dict) -> ActionResult:
-        slack_url = os.getenv("SLACK_WEBHOOK_URL")
+        slack_url = settings.SLACK_WEBHOOK_URL
         if slack_url:
             try:
                 async with httpx.AsyncClient(timeout=10) as client:

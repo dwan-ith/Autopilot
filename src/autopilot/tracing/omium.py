@@ -1,9 +1,9 @@
 from __future__ import annotations
 
-import os
 from typing import Any
 
 from autopilot.storage import Store
+from autopilot.config import settings
 
 
 class TraceSink:
@@ -16,7 +16,7 @@ class TraceSink:
 
     def __init__(self, store: Store):
         self.store = store
-        self.enabled = bool(os.getenv("OMIUM_API_KEY"))
+        self.enabled = bool(settings.OMIUM_API_KEY)
 
     def emit(
         self,

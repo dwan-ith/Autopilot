@@ -4,3 +4,5 @@ pydantic
 python-dotenv
 httpx
 python-multipart
+redis
+respx

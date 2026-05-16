@@ -39,9 +39,10 @@ log = logging.getLogger("autopilot.connectors.github")
 GITHUB_API = "https://api.github.com"
 REPO_QUALIFIER = re.compile(r"\brepo:[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+\b")
 UNSUPPORTED_ISSUE_QUALIFIERS = re.compile(
-    r"\b(commits?|commit|since:\S+|after:\S+|before:\S+|pushed:\S+)\b|(?<!\w):\S+",
+    r"\b(commits?|commit|since:\S+|after:\S+|before:\S+|pushed:\S+|author:\S+|committer:\S+)\b|(?<!\w):\S+",
     re.IGNORECASE,
 )
+SEARCH_TOKEN = re.compile(r"[A-Za-z0-9_.-]+")
 
 
 def _token() -> str | None:
@@ -232,31 +233,30 @@ class GitHubConnector(Connector):
         """Search GitHub issues and PRs using the GitHub Search API.
         Works anonymously for public repos (60 req/hr). Token enables private repos.
         """
-        target = repo or self._default_repo()
-        search_query = self._build_search_query(query, repo)
-
         results: list[Evidence] = []
-        try:
-            async with httpx.AsyncClient(timeout=15) as client:
-                headers = await self._headers()
-                data = await self._search_issues(client, search_query, headers)
-        except httpx.HTTPStatusError as exc:
-            if target and exc.response.status_code == 422:
+        data: dict[str, Any] = {}
+        candidates = self._search_candidates(query, repo)
+        async with httpx.AsyncClient(timeout=15) as client:
+            headers = await self._headers()
+            for attempt, search_query in enumerate(candidates, start=1):
                 try:
-                    fallback_query = self._build_search_query(query, repo="", use_default=False, use_inline_repo=False)
-                    log.warning("GitHub scoped search rejected; retrying unscoped query: %s", fallback_query)
-                    async with httpx.AsyncClient(timeout=15) as client:
-                        headers = await self._headers()
-                        data = await self._search_issues(client, fallback_query, headers)
-                except Exception as fallback_exc:
-                    log.error("GitHub fallback search failed: %s", fallback_exc)
+                    data = await self._search_issues(client, search_query, headers)
+                    if attempt > 1:
+                        log.info("GitHub search succeeded after fallback query: %s", search_query)
+                    break
+                except httpx.HTTPStatusError as exc:
+                    if exc.response.status_code == 422 and attempt < len(candidates):
+                        log.warning(
+                            "GitHub search query rejected; retrying with safer query (%d/%d)",
+                            attempt + 1,
+                            len(candidates),
+                        )
+                        continue
+                    log.error("GitHub search failed: %s", exc)
                     return []
-            else:
-                log.error("GitHub search failed: %s", exc)
-                return []
-        except Exception as exc:
-            log.error("GitHub search failed: %s", exc)
-            return []
+                except Exception as exc:
+                    log.error("GitHub search failed: %s", exc)
+                    return []
 
         for item in data.get("items", []):
             results.append(Evidence(
@@ -284,6 +284,45 @@ class GitHubConnector(Connector):
         resp.raise_for_status()
         return resp.json()
 
+    def _search_candidates(self, query: str, repo: str | None = None) -> list[str]:
+        """Progressively safer GitHub issue search queries.
+
+        Agent-generated search strings often contain commit/date qualifiers that
+        are valid elsewhere but rejected by GitHub's issue search. Try a scoped
+        rich query first, then fall back to simple issue searches that GitHub
+        consistently accepts for public anonymous search.
+        """
+        candidates: list[str] = []
+        rich = self._build_search_query(query, repo)
+        candidates.append(rich)
+
+        unscoped = self._build_search_query(query, repo="", use_default=False, use_inline_repo=False)
+        candidates.append(unscoped)
+
+        terms = self._simple_terms(query)
+        candidates.append(f"{terms} is:issue")
+        if target := (repo or self._default_repo()):
+            candidates.append(f"{terms} is:issue repo:{target}")
+
+        seen: set[str] = set()
+        final: list[str] = []
+        for item in candidates:
+            normalized = re.sub(r"\s+", " ", item).strip()
+            if normalized and normalized not in seen:
+                seen.add(normalized)
+                final.append(normalized)
+        return final
+
+    def _simple_terms(self, query: str) -> str:
+        stripped = REPO_QUALIFIER.sub(" ", query or "")
+        stripped = UNSUPPORTED_ISSUE_QUALIFIERS.sub(" ", stripped)
+        tokens = [
+            token
+            for token in SEARCH_TOKEN.findall(stripped)
+            if len(token) > 1 and ":" not in token
+        ]
+        return " ".join(tokens[:8]) or "incident"
+
     def _build_search_query(
         self,
         query: str,
@@ -297,7 +336,7 @@ class GitHubConnector(Connector):
             target = inline_repo.group(0).split(":", 1)[1]
         terms = REPO_QUALIFIER.sub(" ", query or "")
         terms = UNSUPPORTED_ISSUE_QUALIFIERS.sub(" ", terms)
-        terms = re.sub(r"\s+", " ", terms).strip() or "incident"
+        terms = self._simple_terms(terms)
         parts = [terms, "in:title,body"]
         if target:
             parts.append(f"repo:{target}")

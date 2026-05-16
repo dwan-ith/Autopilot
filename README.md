@@ -104,6 +104,9 @@ Set the following environment variables in `.env` to enable specific features:
 | `AUTOPILOT_API_KEY` | Protects API endpoints and webhooks. |
 | `AUTOPILOT_WEBHOOK_SECRET` | Enables HMAC signature verification for inbound webhooks. |
 | `AUTOPILOT_DISABLE_LLM=1` | Runs the system in offline, deterministic heuristic mode. |
+| `AUTOPILOT_PROVIDER_PREFLIGHT_ON_STARTUP` | `1` to run provider preflight at startup and quarantine bad LLM slots before missions. |
+| `AUTOPILOT_LLM_TIMEOUT_SECONDS` | Per-provider LLM request timeout. |
+| `AUTOPILOT_LLM_MAX_RETRY_DELAY_SECONDS` | Maximum delay honored for provider retry/backoff during demos. |
 | `AUTOPILOT_PERSISTENT_MONITORING=1` | Enables background monitoring of connected services. |
 | `AUTOPILOT_MONITOR_INTERVAL_SECONDS` | Background monitor interval, minimum 30 seconds. |
 | `OPENROUTER_API_KEY` | Primary LLM provider key (recommended). |
@@ -135,6 +138,9 @@ Use **Backend** + **Frontend** from [Setup](#setup). Highlights:
 - `POST /api/monitoring/check` — inspect connected services and create a mission only if a real connected service is degraded.
 - `GET /api/operators` — judge-facing catalog: tools, readiness, safe actions.
 - `POST /api/operators/{id}/probe` — bounded probes with real side effects where declared.
+- `POST /api/operators/{id}/smoke` — read-only live credential proof for account connectors.
+- `GET /api/provider/health` and `POST /api/provider/preflight` — LLM slot health, quarantine, and bounded live checks.
+- `GET /api/tracing/status` and `POST /api/tracing/probe` — local/Omium trace proof status without relying on the legacy HTTP trace endpoint.
 
 Additional endpoints:
 

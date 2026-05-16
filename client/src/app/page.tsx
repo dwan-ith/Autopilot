@@ -37,6 +37,8 @@ import {
   ConnectorDirectoryItem,
   Mission,
   MissionGraphNode,
+  ProviderHealth,
+  TracingStatus,
 } from "@/types";
 
 const API_BASE = process.env.NEXT_PUBLIC_API_URL || "";
@@ -89,6 +91,8 @@ export default function Dashboard() {
     traces,
     connectors,
     connectorDirectory,
+    providerHealth,
+    tracingStatus,
     approvals,
     provider,
     connection,
@@ -99,6 +103,7 @@ export default function Dashboard() {
     approveAction,
     rejectAction,
     refresh,
+    totals,
   } = useAutopilot();
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [currentView, setCurrentView] = useState<View>("dashboard");
@@ -175,6 +180,9 @@ export default function Dashboard() {
         <div className="px-3 pt-3">
           <ConnectionCard connection={connection} />
         </div>
+        <div className="px-3 pt-2">
+          <SystemProofCard providerHealth={providerHealth} tracingStatus={tracingStatus} />
+        </div>
 
         <nav className="flex-1 space-y-1 p-3">
           <NavItem
@@ -182,7 +190,7 @@ export default function Dashboard() {
             label="Missions"
             active={currentView === "dashboard"}
             onClick={() => setCurrentView("dashboard")}
-            count={missions.length}
+            count={totals.missions || missions.length}
           />
           <NavItem
             icon={Puzzle}
@@ -196,14 +204,14 @@ export default function Dashboard() {
             label="Approvals"
             active={currentView === "approvals"}
             onClick={() => setCurrentView("approvals")}
-            count={approvals.length}
+            count={totals.approvals || approvals.length}
           />
           <NavItem
             icon={Activity}
             label="System Trace"
             active={currentView === "traces"}
             onClick={() => setCurrentView("traces")}
-            count={traces.length}
+            count={totals.traces || traces.length}
           />
           <NavItem
             icon={BarChart3}
@@ -527,11 +535,7 @@ function SignalModal({ isOpen, onClose, onSubmit }: { isOpen: boolean; onClose: 
   const [entities, setEntities] = useState("");
   const [urgency, setUrgency] = useState("high");
 
-  const presets = [
-    { label: "Sentry Spike", type: "monitoring_error", summary: "Critical spike in 5xx errors on checkout service", entities: "checkout, backend", urgency: "critical" },
-    { label: "Escalation", type: "support_escalation", summary: "Enterprise customer 'Acme Corp' reporting data loss", entities: "acme-corp, storage", urgency: "high" },
-    { label: "Security", type: "security_alert", summary: "Unauthorized login attempts detected on admin panel", entities: "auth-service, admin", urgency: "critical" },
-  ];
+  const presets: any[] = [];
 
   const applyPreset = (p: typeof presets[0]) => {
     setType(p.type);
@@ -699,6 +703,52 @@ function ConnectionCard({ connection }: { connection: BackendConnection }) {
         <div className="flex justify-between gap-2">
           <span>Events</span>
           <span>{connection.sseConnected ? "streaming" : "disconnected"}</span>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function SystemProofCard({
+  providerHealth,
+  tracingStatus,
+}: {
+  providerHealth: ProviderHealth | null;
+  tracingStatus: TracingStatus | null;
+}) {
+  const activeSlots = providerHealth?.active_slots ?? 0;
+  const quarantinedSlots = providerHealth?.quarantined_slots ?? 0;
+  const providerOk = Boolean(providerHealth && (providerHealth.disabled || activeSlots > 0));
+  const traceMode = tracingStatus?.proof_mode || "unknown";
+  const traceOk = Boolean(tracingStatus?.local_sqlite);
+
+  return (
+    <div className="rounded-lg border border-border/40 bg-white/[0.015] p-2.5">
+      <div className="mb-2 flex items-center justify-between">
+        <span className="text-[10px] font-black uppercase tracking-wider text-muted-foreground/60">Proof</span>
+        <span
+          className={cn(
+            "h-1.5 w-1.5 rounded-full",
+            providerOk && traceOk ? "bg-emerald-500" : "bg-amber-500",
+          )}
+        />
+      </div>
+      <div className="space-y-1.5 text-[10px] font-bold">
+        <div className="flex items-center justify-between gap-2">
+          <span className="text-muted-foreground/60">LLM slots</span>
+          <span className={providerOk ? "text-emerald-500" : "text-amber-500"}>
+            {providerHealth ? `${activeSlots}/${providerHealth.configured_slots} active` : "unknown"}
+          </span>
+        </div>
+        <div className="flex items-center justify-between gap-2">
+          <span className="text-muted-foreground/60">Quarantine</span>
+          <span className={quarantinedSlots ? "text-amber-500" : "text-muted-foreground/70"}>
+            {providerHealth ? quarantinedSlots : "-"}
+          </span>
+        </div>
+        <div className="flex items-center justify-between gap-2">
+          <span className="text-muted-foreground/60">Tracing</span>
+          <span className={traceOk ? "text-emerald-500" : "text-amber-500"}>{traceMode}</span>
         </div>
       </div>
     </div>

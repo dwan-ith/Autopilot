@@ -265,6 +265,17 @@ class Store:
             return None
         return Mission.model_validate_json(row["payload"])
 
+    
+    def count_missions(self) -> int:
+        with self._lock, closing(self.connect()) as conn, conn:
+            row = conn.execute('SELECT COUNT(*) as count FROM missions').fetchone()
+        return row['count'] if row else 0
+
+    def count_traces(self) -> int:
+        with self._lock, closing(self.connect()) as conn, conn:
+            row = conn.execute('SELECT COUNT(*) as count FROM traces').fetchone()
+        return row['count'] if row else 0
+
     def list_missions(self, limit: int = 50) -> list[dict[str, Any]]:
         with self._lock, closing(self.connect()) as conn, conn:
             rows = conn.execute(

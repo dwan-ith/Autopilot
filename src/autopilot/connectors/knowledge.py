@@ -10,51 +10,19 @@ from autopilot.models import Capability, ConnectorManifest, ConnectorToolSpec, E
 
 LOCAL_KNOWLEDGE = [
     {
-        "keywords": ["export", "rollout", "job", "failure", "pipeline"],
-        "title": "Runbook: Export failures after rollout",
+        "title": "Export failure after rollout runbook",
         "summary": (
-            "Recent export failures are commonly caused by schema flag drift. "
-            "Check rollout metadata, compare job error signatures, and disable "
-            "the experimental export pipeline if failures exceed 20%."
+            "For export failures after a release, compare the latest deployment, "
+            "schema migrations, queue health, and feature flags before escalating."
         ),
-        "confidence": 0.82,
-    },
-    {
-        "keywords": ["customer", "enterprise", "sla", "urgent"],
-        "title": "Policy: Enterprise escalation handling",
-        "summary": (
-            "Enterprise-impacting incidents require an internal alert, "
-            "customer-safe update draft, and owner assignment within 15 minutes."
-        ),
-        "confidence": 0.88,
-    },
-    {
-        "keywords": ["latency", "error", "spike", "service", "dependency"],
-        "title": "Runbook: Error spike investigation",
-        "summary": (
-            "Correlate error spikes with deploys, dependencies, traffic, and feature flags. "
-            "Prefer rollback or flag-disable actions with validation."
-        ),
-        "confidence": 0.76,
-    },
-    {
-        "keywords": ["deploy", "deployment", "regression", "config", "flag"],
-        "title": "Runbook: Deployment regression response",
-        "summary": (
-            "If a deployment is correlated with a regression, capture the diff, "
-            "verify with canary metrics, and prepare a rollback PR. "
-            "Do not rollback without verifying impact scope."
-        ),
-        "confidence": 0.80,
-    },
-    {
-        "keywords": ["timeout", "queue", "worker", "async", "background"],
-        "title": "Runbook: Async worker and queue failures",
-        "summary": (
-            "Check dead-letter queues, worker memory usage, and connection pool exhaustion. "
-            "Common causes: thundering herd after outage recovery, lock contention."
-        ),
+        "keywords": ["export", "failure", "rollout", "deployment", "schema"],
         "confidence": 0.74,
+    },
+    {
+        "title": "Customer incident triage checklist",
+        "summary": "Correlate support reports with monitoring, recent changes, and known incidents.",
+        "keywords": ["customer", "incident", "support", "monitoring"],
+        "confidence": 0.68,
     },
 ]
 

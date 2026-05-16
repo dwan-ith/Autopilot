@@ -208,3 +208,41 @@ export interface OperatorProbeResult {
   output: unknown;
   readiness?: ConnectorReadiness;
 }
+
+export interface ProviderSlotHealth {
+  name: string;
+  env_key: string;
+  model: string;
+  configured: boolean;
+  status: string;
+  detail: string;
+  quarantined: boolean;
+  quarantined_until?: number | null;
+  last_checked_at?: number | null;
+}
+
+export interface ProviderHealth {
+  disabled: boolean;
+  provider: string;
+  configured_slots: number;
+  active_slots: number;
+  quarantined_slots: number;
+  slots: ProviderSlotHealth[];
+}
+
+export interface TracingStatus {
+  local_sqlite: boolean;
+  session_id: string;
+  api_key_configured: boolean;
+  sdk_requested: boolean;
+  sdk_importable: boolean;
+  sdk_initialized?: boolean;
+  http_relay_configured: boolean;
+  http_relay_enabled: boolean;
+  remote_status: string;
+  last_remote_error?: string | null;
+  last_remote_event_at?: string | null;
+  last_sdk_event_at?: string | null;
+  proof_mode: string;
+  local_trace_events?: number;
+}

@@ -464,6 +464,59 @@ class RuntimeKernelTest(unittest.TestCase):
             "export failure in:title,body",
         )
 
+    def test_github_search_candidates_include_safe_fallbacks(self):
+        old_repo = os.environ.get("GITHUB_REPO")
+        os.environ["GITHUB_REPO"] = "real/repo"
+        try:
+            candidates = GitHubConnector()._search_candidates(
+                "repo:fake/repo commits since:1h after:2024-07-24 :today export failure"
+            )
+        finally:
+            if old_repo is None:
+                os.environ.pop("GITHUB_REPO", None)
+            else:
+                os.environ["GITHUB_REPO"] = old_repo
+        self.assertGreaterEqual(len(candidates), 3)
+        self.assertTrue(any(q == "export failure is:issue" for q in candidates))
+        self.assertFalse(any("since:" in q or "after:" in q or ":today" in q for q in candidates))
+
+    def test_provider_health_and_tracing_status_endpoints(self):
+        client = TestClient(api_main.app)
+        provider = client.get("/api/provider/health")
+        self.assertEqual(provider.status_code, 200, provider.text)
+        self.assertIn("configured_slots", provider.json())
+
+        tracing = client.get("/api/tracing/status")
+        self.assertEqual(tracing.status_code, 200, tracing.text)
+        self.assertTrue(tracing.json()["local_sqlite"])
+
+        probe = client.post("/api/tracing/probe")
+        self.assertEqual(probe.status_code, 200, probe.text)
+        self.assertIn("proof_mode", probe.json())
+
+    def test_account_connector_smoke_reports_blocked_without_credentials(self):
+        old_google_id = os.environ.pop("GOOGLE_CLIENT_ID", None)
+        old_google_secret = os.environ.pop("GOOGLE_CLIENT_SECRET", None)
+        old_notion = os.environ.pop("NOTION_API_KEY", None)
+        old_linear = os.environ.pop("LINEAR_API_KEY", None)
+        try:
+            client = TestClient(api_main.app)
+            for connector_id in ["gmail", "google_drive", "notion", "linear"]:
+                response = client.post(f"/api/operators/{connector_id}/smoke", json={})
+                self.assertEqual(response.status_code, 200, response.text)
+                body = response.json()
+                self.assertEqual(body["status"], "blocked")
+                self.assertFalse(body["live"])
+        finally:
+            if old_google_id:
+                os.environ["GOOGLE_CLIENT_ID"] = old_google_id
+            if old_google_secret:
+                os.environ["GOOGLE_CLIENT_SECRET"] = old_google_secret
+            if old_notion:
+                os.environ["NOTION_API_KEY"] = old_notion
+            if old_linear:
+                os.environ["LINEAR_API_KEY"] = old_linear
+
     def test_weather_connector_has_no_key_fallback(self):
         old_key = os.environ.pop("OPENWEATHER_API_KEY", None)
         try:

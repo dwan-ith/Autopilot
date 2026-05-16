@@ -1,6 +1,16 @@
 import { useState, useEffect, useCallback } from "react";
 import axios from "axios";
-import { Mission, Trace, Connector, ConnectorDirectoryItem, ActionApproval, Operator, OperatorProbeResult } from "@/types";
+import {
+  Mission,
+  Trace,
+  Connector,
+  ConnectorDirectoryItem,
+  ActionApproval,
+  Operator,
+  OperatorProbeResult,
+  ProviderHealth,
+  TracingStatus,
+} from "@/types";
 
 const API_BASE = process.env.NEXT_PUBLIC_API_URL || "";
 const API_KEY = process.env.NEXT_PUBLIC_AUTOPILOT_API_KEY || "";
@@ -48,10 +58,13 @@ const initialConnection: BackendConnection = {
 export function useAutopilot() {
   const [missions, setMissions] = useState<Mission[]>([]);
   const [traces, setTraces] = useState<Trace[]>([]);
+  const [totals, setTotals] = useState({ missions: 0, traces: 0, approvals: 0 });
   const [connectors, setConnectors] = useState<Connector[]>([]);
   const [connectorDirectory, setConnectorDirectory] = useState<ConnectorDirectoryItem[]>([]);
   const [operators, setOperators] = useState<Operator[]>([]);
   const [operatorProbeResults, setOperatorProbeResults] = useState<Record<string, OperatorProbeResult>>({});
+  const [providerHealth, setProviderHealth] = useState<ProviderHealth | null>(null);
+  const [tracingStatus, setTracingStatus] = useState<TracingStatus | null>(null);
   const [approvals, setApprovals] = useState<ActionApproval[]>([]);
   const [connection, setConnection] = useState<BackendConnection>(initialConnection);
   const [isLoading, setIsLoading] = useState(true);
@@ -69,16 +82,22 @@ export function useAutopilot() {
       let approvalsData: ActionApproval[] = [];
       let missionsData: Mission[] = [];
       let tracesData: Trace[] = [];
+      let providerHealthData: ProviderHealth | null = null;
+      let tracingStatusData: TracingStatus | null = null;
 
       try {
-        const [apprRes, missRes, tracRes] = await Promise.all([
+        const [apprRes, missRes, tracRes, providerHealthRes, tracingStatusRes] = await Promise.all([
           axios.get(`${API_BASE}/api/approvals`, readConfig),
           axios.get(`${API_BASE}/api/missions`, readConfig),
           axios.get(`${API_BASE}/api/traces`, readConfig),
+          axios.get(`${API_BASE}/api/provider/health`, readConfig),
+          axios.get(`${API_BASE}/api/tracing/status`, readConfig),
         ]);
         approvalsData = apprRes.data;
         missionsData = missRes.data;
         tracesData = tracRes.data;
+        providerHealthData = providerHealthRes.data;
+        tracingStatusData = tracingStatusRes.data;
       } catch {
         /* These endpoints require AUTOPILOT_API_KEY when set; dashboard must still refresh public data without it */
       }
@@ -89,6 +108,8 @@ export function useAutopilot() {
       setApprovals(approvalsData);
       setMissions(missionsData);
       setTraces(tracesData);
+      setProviderHealth(providerHealthData);
+      setTracingStatus(tracingStatusData);
       setConnection((current) => ({
         ...current,
         status: current.sseConnected ? "connected" : "degraded",
@@ -130,6 +151,7 @@ export function useAutopilot() {
         const data = JSON.parse(event.data);
         if (data.missions) setMissions(data.missions);
         if (data.traces) setTraces(data.traces);
+        if (data.totals) setTotals(data.totals);
       } catch (err) {
         console.error("SSE parse error:", err);
         setConnection((current) => ({
@@ -261,6 +283,8 @@ export function useAutopilot() {
     connectorDirectory,
     operators,
     operatorProbeResults,
+    providerHealth,
+    tracingStatus,
     approvals,
     provider: connection.provider,
     connection,
@@ -273,5 +297,6 @@ export function useAutopilot() {
     rejectAction,
     probeOperator,
     refresh: fetchStaticData,
+    totals,
   };
 }

@@ -44,7 +44,7 @@ from autopilot.connectors.oauth import (
 )
 from autopilot.kernel import RuntimeKernel
 from autopilot.models import ActionResult, ApprovalStatus, AuthMode, Capability, GraphNodeKind, MissionGraphNode, Signal, StepStatus, WebhookSignalRequest, new_id, utc_now
-from autopilot.operators.llm import active_provider_name
+from autopilot.operators.llm import active_provider_name, preflight_providers, provider_health
 from autopilot.storage import ARTIFACT_DIR, ROOT, Store
 from fastapi.responses import RedirectResponse
 
@@ -172,19 +172,24 @@ _signal_rate = int(os.getenv("AUTOPILOT_SIGNAL_RATE_LIMIT", "30"))
 _signal_bucket = _TokenBucket(rate=_signal_rate / 60.0, capacity=float(_signal_rate))
 
 
-def _init_omium_sdk_if_configured() -> None:
-    """Optional official Omium SDK (see https://docs.omium.ai/docs/sdk/python-sdk).
+def _init_omium_sdk_if_configured() -> dict[str, Any]:
+    """Best-effort official Omium SDK initialization.
 
-    Enabled with OMIUM_SDK_INIT=1 + OMIUM_API_KEY + ``pip install omium``.
-    TraceSink SQLite events are unchanged; dashboard tracing uses SDK / decorators.
+    The product must not pretend that arbitrary HTTP trace POSTs prove Omium
+    visibility. SDK initialization is reported explicitly and local SQLite
+    tracing remains authoritative when the SDK is unavailable.
     """
     log_api = logging.getLogger("autopilot.api")
-    if os.getenv("OMIUM_SDK_INIT", "").lower() not in {"1", "true", "yes"}:
-        return
+    sdk_requested = any(
+        os.getenv(name, "").strip().lower() in {"1", "true", "yes", "on", "enabled"}
+        for name in ["OMIUM_SDK_INIT", "OMIUM_TRACING", "OMIUM_CHECKPOINTS"]
+    )
+    if not sdk_requested:
+        return {"requested": False, "initialized": False, "detail": "Set OMIUM_SDK_INIT=1 or OMIUM_TRACING=1 to enable the SDK."}
     key = os.getenv("OMIUM_API_KEY", "").strip()
     if not key:
         log_api.warning("OMIUM_SDK_INIT is set but OMIUM_API_KEY is empty")
-        return
+        return {"requested": True, "initialized": False, "detail": "OMIUM_API_KEY is empty."}
     try:
         import omium
     except ImportError:
@@ -192,21 +197,34 @@ def _init_omium_sdk_if_configured() -> None:
             "OMIUM_SDK_INIT is set but the 'omium' package is not installed "
             "(install with: pip install omium   or   pip install '.[omium]')"
         )
-        return
+        return {"requested": True, "initialized": False, "detail": "omium package is not installed."}
     base = os.getenv("OMIUM_API_URL", "").strip() or None
     try:
-        omium.init(
-            api_key=key,
-            project=os.getenv("OMIUM_PROJECT", "autopilot"),
-            api_base_url=base,
-            debug=os.getenv("OMIUM_DEBUG", "").lower() in {"1", "true", "yes"},
-        )
+        init_kwargs = {
+            "api_key": key,
+            "project": os.getenv("OMIUM_PROJECT", "autopilot"),
+            "auto_trace": os.getenv("OMIUM_TRACING", "1").strip().lower() not in {"0", "false", "no", "off"},
+            "auto_checkpoint": os.getenv("OMIUM_CHECKPOINTS", "1").strip().lower() not in {"0", "false", "no", "off"},
+            "debug": os.getenv("OMIUM_DEBUG", "").lower() in {"1", "true", "yes"},
+        }
+        if base:
+            init_kwargs["api_base_url"] = base
+        try:
+            omium.init(**init_kwargs)
+        except TypeError:
+            # SDK versions have changed names for the base-url/project fields.
+            fallback_kwargs = {"api_key": key}
+            if base:
+                fallback_kwargs["api_url"] = base
+            omium.init(**fallback_kwargs)
         log_api.info(
             "Omium SDK initialized for project=%s",
             os.getenv("OMIUM_PROJECT", "autopilot"),
         )
+        return {"requested": True, "initialized": True, "detail": "Omium SDK initialized."}
     except Exception as exc:
         log_api.warning("Omium SDK init failed (non-fatal): %s", exc)
+        return {"requested": True, "initialized": False, "detail": str(exc)[:200]}
 
 
 @asynccontextmanager
@@ -221,7 +239,14 @@ async def lifespan(app: FastAPI):
             mod.migrate()
     except Exception:
         pass  # Non-fatal — migration already applied or script not present
-    _init_omium_sdk_if_configured()
+    omium_status = _init_omium_sdk_if_configured()
+    store.trace(None, "omium.sdk.status", "complete" if omium_status.get("initialized") else "skipped", omium_status)
+    if os.getenv("AUTOPILOT_PROVIDER_PREFLIGHT_ON_STARTUP", "").lower() in {"1", "true", "yes"}:
+        try:
+            health_result = await preflight_providers()
+            store.trace(None, "provider.preflight.startup", "complete", health_result)
+        except Exception as exc:
+            store.trace(None, "provider.preflight.startup", "failed", {"error": str(exc)})
     runtime.resume_active()
     # Optionally auto-connect demo-capable connectors on startup when enabled.
     try:
@@ -292,6 +317,40 @@ async def health() -> dict[str, str]:
 async def provider() -> dict[str, str]:
     """Expose the active LLM provider name to the dashboard."""
     return {"provider": active_provider_name()}
+
+
+@app.get("/api/provider/health")
+async def provider_health_endpoint(request: Request) -> dict[str, Any]:
+    """Expose safe provider-pool health without leaking API keys."""
+    require_read_access(request)
+    return provider_health()
+
+
+@app.post("/api/provider/preflight")
+async def provider_preflight_endpoint(request: Request) -> dict[str, Any]:
+    """Run a bounded live provider preflight and quarantine bad slots."""
+    require_write_access(request)
+    result = await preflight_providers()
+    store.trace(None, "provider.preflight.manual", "complete", result)
+    return result
+
+
+@app.get("/api/tracing/status")
+async def tracing_status(request: Request) -> dict[str, Any]:
+    """Show whether tracing is local-only, SDK-requested, or relay-delivered."""
+    require_read_access(request)
+    status = runtime.tracer.status()
+    status["local_trace_events"] = len(store.list_traces(limit=1000))
+    return status
+
+
+@app.post("/api/tracing/probe")
+async def tracing_probe(request: Request) -> dict[str, Any]:
+    """Emit a local trace and optional relay event so trace proof is explicit."""
+    require_write_access(request)
+    payload = {"source": "manual_probe", "timestamp": utc_now().isoformat()}
+    runtime.tracer.emit(None, "tracing.probe", "complete", payload)
+    return runtime.tracer.status()
 
 @app.get("/api/connectors")
 async def connectors() -> list[dict[str, Any]]:
@@ -437,6 +496,80 @@ async def probe_operator(connector_id: str, request: Request, payload: dict[str,
         }
         store.trace(None, "operator.probe.failed", "failed", response)
         return response
+
+
+@app.post("/api/operators/{connector_id}/smoke")
+async def smoke_operator(connector_id: str, request: Request, payload: dict[str, Any] | None = None) -> dict[str, Any]:
+    """Credential-gated live proof for account connectors.
+
+    This is intentionally read-only for Gmail, Drive, Notion, Linear, and
+    GitHub. It proves live access when credentials exist and returns a blocked
+    state when setup is incomplete instead of pretending the connector is ready.
+    """
+    require_read_access(request)
+    connector = _connector_for_operator(connector_id)
+    p = payload or {}
+    query = str(p.get("query") or "AUTOPILOT smoke test")
+    started = time.monotonic()
+    readiness = connector.readiness()
+    if not readiness.get("action_ready") and not readiness.get("configured"):
+        result = {
+            "operator": connector_id,
+            "runtime_name": connector.manifest.name,
+            "status": "blocked",
+            "live": False,
+            "readiness": readiness,
+            "duration_ms": round((time.monotonic() - started) * 1000, 1),
+            "detail": readiness.get("detail", "Connector is not configured."),
+        }
+        store.trace(None, "operator.smoke.blocked", "blocked", result)
+        return result
+
+    try:
+        if connector.has(Capability.SEARCH):
+            evidence = await connector.search(query)
+            failed = any(
+                getattr(item, "confidence", 1.0) <= 0.0
+                or "failed" in getattr(item, "title", "").lower()
+                or "not authorized" in getattr(item, "title", "").lower()
+                or "not configured" in getattr(item, "title", "").lower()
+                for item in evidence
+            )
+            status = "failed" if failed else "live"
+            result = {
+                "operator": connector_id,
+                "runtime_name": connector.manifest.name,
+                "status": status,
+                "live": status == "live",
+                "readiness": readiness,
+                "duration_ms": round((time.monotonic() - started) * 1000, 1),
+                "evidence_count": len(evidence),
+                "sample": [item.model_dump() for item in evidence[:3]],
+            }
+        else:
+            result = {
+                "operator": connector_id,
+                "runtime_name": connector.manifest.name,
+                "status": "live" if readiness.get("action_ready") else "blocked",
+                "live": bool(readiness.get("action_ready")),
+                "readiness": readiness,
+                "duration_ms": round((time.monotonic() - started) * 1000, 1),
+                "detail": readiness.get("detail", ""),
+            }
+        store.trace(None, f"operator.smoke.{result['status']}", result["status"], result)
+        return result
+    except Exception as exc:
+        result = {
+            "operator": connector_id,
+            "runtime_name": connector.manifest.name,
+            "status": "failed",
+            "live": False,
+            "readiness": readiness,
+            "duration_ms": round((time.monotonic() - started) * 1000, 1),
+            "error": str(exc),
+        }
+        store.trace(None, "operator.smoke.failed", "failed", result)
+        return result
 
 
 def _monitor_interval_seconds() -> int:
@@ -773,7 +906,8 @@ async def events(request: Request) -> StreamingResponse:
     async def stream():
         last_payload = ""
         while True:
-            payload = json.dumps({"missions": store.list_missions(), "traces": store.list_traces(limit=20)}, default=str)
+            totals = {"missions": store.count_missions(), "traces": store.count_traces(), "approvals": len(store.list_action_approvals())}
+            payload = json.dumps({"missions": store.list_missions(), "traces": store.list_traces(limit=20), "totals": totals}, default=str)
             if payload != last_payload:
                 yield f"data: {payload}\n\n"
                 last_payload = payload

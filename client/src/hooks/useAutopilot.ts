@@ -69,6 +69,19 @@ export function useAutopilot() {
   const [connection, setConnection] = useState<BackendConnection>(initialConnection);
   const [isLoading, setIsLoading] = useState(true);
 
+  const fetchMissionsAndTraces = useCallback(async () => {
+    try {
+      const [missionsRes, tracesRes] = await Promise.all([
+        axios.get(`${API_BASE}/api/missions`, readConfig),
+        axios.get(`${API_BASE}/api/traces`, readConfig),
+      ]);
+      setMissions(missionsRes.data);
+      setTraces(tracesRes.data.slice(0, 20));
+    } catch {
+      // non-fatal — missions will update on next poll
+    }
+  }, []);
+
   const fetchStaticData = useCallback(async () => {
     try {
       const [healthRes, connRes, dirRes, operatorsRes, provRes] = await Promise.all([
@@ -117,6 +130,9 @@ export function useAutopilot() {
         runtime: healthRes.data.runtime || "autonomous-operator-runtime",
         message: current.sseConnected ? "Backend and event stream connected" : "Backend reachable; waiting for event stream",
       }));
+
+      // Also immediately fetch missions so they show up on load
+      await fetchMissionsAndTraces();
     } catch (error) {
       console.error("Failed to connect to AUTOPILOT backend:", error);
       setConnection((current) => ({
@@ -128,12 +144,18 @@ export function useAutopilot() {
     } finally {
       setIsLoading(false);
     }
-  }, []);
+  }, [fetchMissionsAndTraces]);
 
   useEffect(() => {
     const refresh = window.setTimeout(() => {
       void fetchStaticData();
     }, 0);
+
+    // Poll missions & traces every 3s as a reliable fallback
+    // (Next.js dev proxy buffers SSE, so SSE alone is not reliable)
+    const poll = window.setInterval(() => {
+      void fetchMissionsAndTraces();
+    }, 3000);
 
     const eventSource = new EventSource(eventStreamUrl);
 
@@ -173,9 +195,10 @@ export function useAutopilot() {
 
     return () => {
       window.clearTimeout(refresh);
+      window.clearInterval(poll);
       eventSource.close();
     };
-  }, [fetchStaticData]);
+  }, [fetchStaticData, fetchMissionsAndTraces]);
 
   const monitorConnectedServices = async () => {
     try {

@@ -77,6 +77,20 @@ def _build_slots() -> list[dict[str, Any]]:
     return slots
 
 
+def active_provider_name() -> str:
+    """Return the name of the first non-quarantined available slot (for metrics)."""
+    now = time.time()
+    cooldown = float(os.getenv("AUTOPILOT_LLM_BAD_SLOT_COOLDOWN_SECONDS", "300"))
+    for slot in _build_slots():
+        name = slot["name"]
+        if name in _BAD_SLOTS:
+            bad_at, _ = _BAD_SLOTS[name]
+            if now - bad_at < cooldown:
+                continue
+        return name
+    return "none"
+
+
 def _slots_for_role(role: str) -> list[dict[str, Any]]:
     all_slots = _build_slots()
     now = time.time()

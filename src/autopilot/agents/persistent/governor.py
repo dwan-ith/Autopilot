@@ -78,21 +78,39 @@ class GovernorAgent(PersistentAgent):
 
         if borderline and action in connector.manifest.safe_actions:
             r = await self._llm_review(mission, connector, action)
-            if isinstance(r, dict) and r.get("decision") == "allow":
-                log.info(
-                    "Governor: LLM overrode policy block for %s.%s (confidence=%.2f)",
-                    connector.manifest.name, action, mission.confidence,
-                )
-                return PolicyDecision(
-                    connector=connector.manifest.name,
-                    action=action,
-                    allowed=True,
-                    reason=f"Governor LLM review approved (borderline case): {r.get('reason', '')}",
-                    risk=decision.risk,
-                    requires_validation=True,
-                    confidence_required=required,
-                    confidence_observed=mission.confidence,
-                )
+            if isinstance(r, dict):
+                llm_decision = r.get("decision", "block")
+                if llm_decision == "allow":
+                    log.info(
+                        "Governor: LLM overrode policy block for %s.%s (confidence=%.2f)",
+                        connector.manifest.name, action, mission.confidence,
+                    )
+                    return PolicyDecision(
+                        connector=connector.manifest.name,
+                        action=action,
+                        allowed=True,
+                        reason=f"Governor LLM review approved (borderline case): {r.get('reason', '')}",
+                        risk=decision.risk,
+                        requires_validation=True,
+                        confidence_required=required,
+                        confidence_observed=mission.confidence,
+                    )
+                elif llm_decision == "hold":
+                    log.info(
+                        "Governor: LLM recommends hold for %s.%s — routing to approval queue",
+                        connector.manifest.name, action,
+                    )
+                    return PolicyDecision(
+                        connector=connector.manifest.name,
+                        action=action,
+                        allowed=False,
+                        reason=f"Governor LLM review: hold for human approval. {r.get('reason', '')}",
+                        risk=decision.risk,
+                        requires_validation=True,
+                        confidence_required=required,
+                        confidence_observed=mission.confidence,
+                    )
+                # "block" falls through to return the original deterministic decision
 
         return decision
 

@@ -211,105 +211,146 @@ Return: {"action": "answer", "result": {"new_hypotheses": [
         return await executor.synthesize_brief(mission)
 
     async def publish_actions(self, mission: Mission, brief: str) -> tuple[list[ActionResult], dict[str, Any]]:
-        """Execute approved actions through connectors and validate results."""
+        """Execute approved actions through connectors, in LLM-generated priority order."""
+        executor = ExecutorAgent()
         actions: list[ActionResult] = []
 
-        # 1. Write artifact report (always runs if artifact connector is present)
-        writers = [c for c in self.registry.by_capability(Capability.WRITE)
-                   if "write_report" in c.manifest.safe_actions]
-        for writer in writers:
-            decision = await self.governor.decide_async(mission, writer, "write_report")
-            mission.policy_decisions.append(decision)
-            if decision.allowed:
-                actions.append(await writer.write(f"mission-{mission.id}", brief, {"mission_id": mission.id}))
+        # Collect all connectors that could be actioned
+        write_connectors = [c for c in self.registry.by_capability(Capability.WRITE)]
+        action_connectors = [c for c in self.registry.by_capability(Capability.ACTION)]
+        notify_connectors = [c for c in self.registry.by_capability(Capability.NOTIFY)]
+        all_connectors = list({c.manifest.name: c for c in
+                               write_connectors + action_connectors + notify_connectors}.values())
 
-        # 2. Create GitHub issue (if configured and policy allows)
-        for connector in self.registry.by_capability(Capability.ACTION):
-            if "create_issue" not in connector.manifest.safe_actions:
+        # Ask Executor to generate a priority-ordered plan
+        plan = await executor.plan_actions(mission, brief, all_connectors)
+        log.info("Executor plan: %s", [(s.get("connector"), s.get("action")) for s in plan])
+
+        # Build a lookup: connector_name → connector instance
+        connector_map = {c.manifest.name: c for c in all_connectors}
+
+        for step in plan:
+            connector_name = step.get("connector", "")
+            action_name = step.get("action", "")
+
+            connector = connector_map.get(connector_name)
+            if not connector:
+                log.debug("Executor: skipping step — connector '%s' not in registry", connector_name)
                 continue
-            readiness = connector.readiness("create_issue")
-            if not readiness.get("action_ready"):
+
+            if action_name not in connector.manifest.safe_actions:
+                log.debug("Executor: '%s.%s' not in safe_actions — skipping", connector_name, action_name)
+                continue
+
+            # Check readiness
+            readiness = connector.readiness(action_name)
+            if not readiness.get("action_ready") and action_name not in {"write_report", "write_action_packet", "notify_ops"}:
                 actions.append(ActionResult(
-                    connector=connector.manifest.name,
-                    action="create_issue",
+                    connector=connector_name,
+                    action=action_name,
                     status="skipped",
                     summary=f"Connector not ready: {readiness.get('detail', 'missing credentials')}",
                     metadata={"readiness": readiness},
                 ))
                 continue
 
-            payload = {
-                "title": f"[AUTOPILOT] {mission.title[:120]}",
-                "body": brief,
-                "description": brief,
-                "severity": mission.severity,
-                "confidence": mission.confidence,
-                "labels": ["autopilot", "incident"] if mission.severity in {"high", "critical"} else ["autopilot"],
-            }
-            decision = await self.governor.decide_async(mission, connector, "create_issue")
+            # Run through Governor
+            decision = await self.governor.decide_async(mission, connector, action_name)
             mission.policy_decisions.append(decision)
 
-            if decision.allowed:
-                result = await connector.action("create_issue", payload)
-                actions.append(result)
-            elif decision.requires_validation:
+            if decision.requires_validation and not decision.allowed:
+                # Queue for human approval
+                payload = self._action_payload(mission, brief, connector_name, action_name)
                 approval = ActionApproval(
                     mission_id=mission.id,
-                    connector=connector.manifest.name,
-                    action="create_issue",
+                    connector=connector_name,
+                    action=action_name,
                     payload=payload,
                     risk=decision.risk,
                     reason=decision.reason,
                 )
                 mission.approvals.append(approval)
                 actions.append(ActionResult(
-                    connector=connector.manifest.name,
-                    action="create_issue",
+                    connector=connector_name,
+                    action=action_name,
                     status="pending_approval",
-                    summary=f"Queued approval {approval.id} — confidence={mission.confidence:.2f}",
+                    summary=f"Queued approval {approval.id} — {decision.reason}",
                     metadata={"approval_id": approval.id, "risk": approval.risk.value},
                 ))
+                continue
 
-        # 3. Write action packet
-        packet_writers = [c for c in self.registry.by_capability(Capability.ACTION)
-                          if "write_action_packet" in c.manifest.safe_actions]
-        if packet_writers:
-            packet = {
-                "packet_name": f"action-packet-{mission.id}",
-                "mission_id": mission.id,
-                "title": mission.title,
-                "severity": mission.severity,
-                "confidence": mission.confidence,
-                "hypotheses": [h.model_dump() for h in mission.hypotheses],
-                "evidence_count": len(mission.evidence),
-                "recommended_action": self._recommended_action(mission),
-            }
-            decision = await self.governor.decide_async(mission, packet_writers[0], "write_action_packet")
-            mission.policy_decisions.append(decision)
-            if decision.allowed:
-                actions.append(await packet_writers[0].action("write_action_packet", packet))
+            if not decision.allowed:
+                actions.append(ActionResult(
+                    connector=connector_name,
+                    action=action_name,
+                    status="blocked",
+                    summary=decision.reason,
+                    metadata={"policy": decision.model_dump()},
+                ))
+                continue
 
-        # 4. Notify ops — use the first NOTIFY connector that has notify_ops in safe_actions
-        notifiers = [
-            c for c in self.registry.by_capability(Capability.NOTIFY)
-            if "notify_ops" in c.manifest.safe_actions
-        ]
-        if notifiers:
-            decision = await self.governor.decide_async(mission, notifiers[0], "notify_ops")
-            mission.policy_decisions.append(decision)
-            if decision.allowed:
-                text = (
-                    f"AUTOPILOT mission complete: {mission.title} | "
-                    f"severity={mission.severity} | confidence={mission.confidence:.2f} | "
-                    f"evidence={len(mission.evidence)} | replans={mission.replans}"
-                )
-                actions.append(await notifiers[0].action("notify_ops", {"mission_id": mission.id, "text": text}))
+            # Execute
+            payload = self._action_payload(mission, brief, connector_name, action_name)
+            try:
+                if action_name == "write_report":
+                    result = await connector.write(f"mission-{mission.id}", brief, {"mission_id": mission.id})
+                else:
+                    result = await connector.action(action_name, payload)
+                actions.append(result)
+            except Exception as exc:
+                log.error("Executor: %s.%s failed: %s", connector_name, action_name, exc)
+                actions.append(ActionResult(
+                    connector=connector_name,
+                    action=action_name,
+                    status="failed",
+                    summary=str(exc),
+                ))
 
-        # 5. Validate outcomes
+        # Validate outcomes
         validator = ValidatorAgent()
         validation = await validator.validate(mission, actions)
 
         return actions, validation
+
+    def _action_payload(self, mission: Mission, brief: str, connector: str, action: str) -> dict[str, Any]:
+        """Build the appropriate payload for a given connector/action combination."""
+        base = {"mission_id": mission.id, "severity": mission.severity, "confidence": mission.confidence}
+        if action == "create_issue":
+            return {
+                **base,
+                "title": f"[AUTOPILOT] {mission.title[:120]}",
+                "body": brief,
+                "description": brief,
+                "labels": ["autopilot", "incident"] if mission.severity in {"high", "critical"} else ["autopilot"],
+            }
+        if action == "notify_ops":
+            return {
+                **base,
+                "text": (
+                    f"AUTOPILOT mission complete: {mission.title} | "
+                    f"severity={mission.severity} | confidence={mission.confidence:.2f} | "
+                    f"evidence={len(mission.evidence)} | replans={mission.replans}"
+                ),
+            }
+        if action == "write_action_packet":
+            return {
+                **base,
+                "packet_name": f"action-packet-{mission.id}",
+                "title": mission.title,
+                "hypotheses": [h.model_dump() for h in mission.hypotheses],
+                "evidence": [e.model_dump() for e in mission.evidence[:20]],
+                "evidence_count": len(mission.evidence),
+                "recommended_action": self._recommended_action(mission),
+            }
+        if action == "trigger_deployment":
+            return {
+                **base,
+                "environment": "staging",
+                "ref": "main",
+                "reason": f"AUTOPILOT automated deployment trigger — {mission.title}",
+            }
+        # Generic fallback for any other action
+        return {**base, "brief": brief[:500]}
 
     def _recommended_action(self, mission: Mission) -> str:
         lead = max(mission.hypotheses, key=lambda h: h.confidence, default=None)

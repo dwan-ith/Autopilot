@@ -56,6 +56,10 @@ class RuntimeKernel:
         self.correlation_window_seconds = correlation_window_seconds
         self.tracer = TraceSink(store)
 
+        # Wire Omium sink into the SubAgent module so every tool call emits a trace
+        from autopilot.agents.base import set_omium_sink
+        set_omium_sink(self.tracer)
+
         # Persistent Memory agent (needs Store)
         self.memory = MemoryAgent(store)
 

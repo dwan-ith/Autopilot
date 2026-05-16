@@ -24,6 +24,28 @@ TAVILY_API = "https://api.tavily.com"
 DDG_API = "https://api.duckduckgo.com/"
 HN_API = "https://hn.algolia.com/api/v1/search"
 
+# Module-level DDG availability flag — probed once on first call, cached thereafter.
+# None = not yet probed, True = available, False = blocked/rate-limited.
+_ddg_available: bool | None = None
+
+
+async def _probe_ddg_once() -> bool:
+    """Check if DDG Instant Answer API is responding. Cached after first call."""
+    global _ddg_available
+    if _ddg_available is not None:
+        return _ddg_available
+    try:
+        async with httpx.AsyncClient(timeout=5) as client:
+            resp = await client.get(
+                DDG_API,
+                params={"q": "ping", "format": "json", "no_redirect": "1"},
+                headers={"User-Agent": "AUTOPILOT/1.0"},
+            )
+            _ddg_available = resp.status_code == 200
+    except Exception:
+        _ddg_available = False
+    return _ddg_available
+
 
 class TavilyConnector(Connector):
     manifest = ConnectorManifest(
@@ -56,20 +78,32 @@ class TavilyConnector(Connector):
 
     def readiness(self, action: str | None = None) -> dict:
         key = self._api_key()
+        # Use cached DDG availability if known, otherwise assume available (will be probed on first search)
+        ddg_ok = _ddg_available  # None = not yet known, treated as optimistically available
+        fallback_available = ddg_ok is not False  # False = known blocked
+        fallback_mode = "duckduckgo+hackernews"
+        fallback_detail = (
+            "Free fallback active: DuckDuckGo + Hacker News. Set TAVILY_API_KEY to upgrade."
+            if fallback_available or ddg_ok is None
+            else "DuckDuckGo appears blocked or rate-limited. Set TAVILY_API_KEY for reliable search."
+        )
+        configured = bool(key) or fallback_available or ddg_ok is None
         return {
-            "configured": True,   # always available — has free fallback
-            "action_ready": True,
+            "configured": configured,
+            "action_ready": configured,
             "missing": [] if key else ["TAVILY_API_KEY (optional — enables AI-powered search)"],
-            "mode": "tavily_ai" if key else "duckduckgo+hackernews",
-            "detail": "Tavily AI search ready." if key else "Free fallback active: DuckDuckGo + Hacker News. Set TAVILY_API_KEY to upgrade.",
+            "mode": "tavily_ai" if key else fallback_mode,
+            "detail": "Tavily AI search ready." if key else fallback_detail,
             "action": action,
             "integration_live": bool(key),
+            "ddg_available": ddg_ok,
         }
 
     async def search(self, query: str) -> list[Evidence]:
         if self._api_key():
             return await self._tavily_search(query)
-        # Free tier: combine DDG instant answers + HN results
+        # Free tier: probe DDG availability, then combine DDG + HN results
+        await _probe_ddg_once()
         results: list[Evidence] = []
         results.extend(await self._ddg_search(query))
         results.extend(await self._hn_search(query))
@@ -77,9 +111,9 @@ class TavilyConnector(Connector):
             results.append(Evidence(
                 source="web_search",
                 title="No results found",
-                summary=f"No results found for '{query[:80]}'. Try a more specific query.",
+                summary=f"No results found for '{query[:80]}'. Set TAVILY_API_KEY for reliable web search.",
                 confidence=0.1,
-                metadata={"mode": "duckduckgo+hackernews"},
+                metadata={"mode": "duckduckgo+hackernews", "ddg_available": _ddg_available},
             ))
         return results[:6]
 

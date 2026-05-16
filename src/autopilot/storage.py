@@ -63,6 +63,8 @@ class Store:
     def __init__(self, path: Path = DB_PATH):
         self.path = path
         self._lock = threading.RLock()
+        self._write_count = 0
+        self._wal_checkpoint_every = int(os.getenv("AUTOPILOT_WAL_CHECKPOINT_EVERY", "50"))
         self.path.parent.mkdir(parents=True, exist_ok=True)
         ARTIFACT_DIR.mkdir(parents=True, exist_ok=True)
         self.init()
@@ -73,6 +75,15 @@ class Store:
         conn.execute("pragma busy_timeout=30000")
         conn.execute("pragma foreign_keys=on")
         return conn
+
+    def _maybe_checkpoint(self, conn: sqlite3.Connection) -> None:
+        """Run a passive WAL checkpoint every N writes to prevent WAL bloat."""
+        self._write_count += 1
+        if self._write_count % self._wal_checkpoint_every == 0:
+            try:
+                conn.execute("pragma wal_checkpoint(PASSIVE)")
+            except Exception:
+                pass  # Non-fatal; SQLite will checkpoint eventually on its own
 
     def init(self) -> None:
         with self._lock, closing(self.connect()) as conn, conn:
@@ -227,6 +238,7 @@ class Store:
                     """,
                     self._mission_row(mission)[1:] + (mission.id,),
                 )
+                self._maybe_checkpoint(conn)
             for signal in mission.signals:
                 self.save_signal(signal, mission.id)
             return
@@ -361,6 +373,7 @@ class Store:
                     utc_now().isoformat(),
                 ),
             )
+            self._maybe_checkpoint(conn)
 
     def list_traces(self, mission_id: str | None = None, limit: int = 100) -> list[dict[str, Any]]:
         with self._lock, closing(self.connect()) as conn, conn:

@@ -26,6 +26,16 @@ export type ManualSignal = {
   payload: Record<string, unknown>;
 };
 
+export type MonitoringCheckResult = {
+  status: string;
+  source: string;
+  duration_ms: number;
+  targets: number;
+  checks: Array<Record<string, unknown>>;
+  issues: Array<Record<string, unknown>>;
+  mission_id?: string | null;
+};
+
 const initialConnection: BackendConnection = {
   status: "checking",
   provider: "-",
@@ -145,16 +155,16 @@ export function useAutopilot() {
     };
   }, [fetchStaticData]);
 
-  const runDemo = async () => {
+  const monitorConnectedServices = async () => {
     try {
-      await axios.post(`${API_BASE}/demo/fire`, {}, writeConfig);
+      await axios.post<MonitoringCheckResult>(`${API_BASE}/api/monitoring/check`, {}, writeConfig);
       await fetchStaticData();
     } catch (error) {
-      console.error("Failed to run demo:", error);
+      console.error("Failed to monitor connected services:", error);
       setConnection((current) => ({
         ...current,
         status: "offline",
-        message: "Demo request could not reach the backend",
+        message: "Connected-service monitor could not reach the backend",
       }));
     }
   };
@@ -255,7 +265,7 @@ export function useAutopilot() {
     provider: connection.provider,
     connection,
     isLoading,
-    runDemo,
+    monitorConnectedServices,
     sendSignal,
     connectConnector,
     disconnectConnector,

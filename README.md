@@ -40,6 +40,12 @@ The pipeline processes missions through nine discrete stages:
 8. Action Publishing
 9. Final Validation
 
+AUTOPILOT can also run as a persistent connected-service monitor. Set
+`AUTOPILOT_PERSISTENT_MONITORING=1` to make the backend periodically inspect
+the connector directory, check runtime readiness, and open an autonomous
+mission only when a connected service is degraded. The dashboard's **Check
+Services** control runs the same monitor once on demand.
+
 ## Connectors
 
 AUTOPILOT integrates with external systems via connectors. Each connector exposes specific read/write capabilities and tools to the agent swarm. 
@@ -52,7 +58,12 @@ Implemented integrations include:
 - **Observability**: Sentry, Weather.
 - **System**: Durable artifacts and generic webhooks.
 
-*Note: Connectors require valid API keys or OAuth credentials to function.*
+Connector readiness is explicit. Some connectors require user credentials for
+real side effects, while others have useful no-key fallbacks:
+
+- **No-key/demo-capable**: local artifacts, local Slack fallback, generic webhooks, local runbooks, Tavily fallback, weather via Open-Meteo.
+- **Optional-key upgraded**: GitHub public search without a token, authenticated/private GitHub with `GITHUB_TOKEN`; weather via OpenWeather with `OPENWEATHER_API_KEY`; Tavily AI search with `TAVILY_API_KEY`.
+- **Account/OAuth/API-key required for real side effects**: Gmail, Google Drive, Notion, Linear, PagerDuty notes, Slack webhook delivery.
 
 ## Setup
 
@@ -93,6 +104,8 @@ Set the following environment variables in `.env` to enable specific features:
 | `AUTOPILOT_API_KEY` | Protects API endpoints and webhooks. |
 | `AUTOPILOT_WEBHOOK_SECRET` | Enables HMAC signature verification for inbound webhooks. |
 | `AUTOPILOT_DISABLE_LLM=1` | Runs the system in offline, deterministic heuristic mode. |
+| `AUTOPILOT_PERSISTENT_MONITORING=1` | Enables background monitoring of connected services. |
+| `AUTOPILOT_MONITOR_INTERVAL_SECONDS` | Background monitor interval, minimum 30 seconds. |
 | `OPENROUTER_API_KEY` | Primary LLM provider key (recommended). |
 | `GROQ_API_KEY` | Fallback LLM provider key. |
 | `OMIUM_API_KEY` | Omium SDK/API authentication (required when Omium integration is enabled). |
@@ -119,7 +132,7 @@ npm run build
 
 Use **Backend** + **Frontend** from [Setup](#setup). Highlights:
 
-- `POST /demo/fire` — multi-signal autonomous mission (honours `AUTOPILOT_API_KEY` when set).
+- `POST /api/monitoring/check` — inspect connected services and create a mission only if a real connected service is degraded.
 - `GET /api/operators` — judge-facing catalog: tools, readiness, safe actions.
 - `POST /api/operators/{id}/probe` — bounded probes with real side effects where declared.
 
@@ -129,4 +142,4 @@ Additional endpoints:
 - `POST /api/operators/web_search/probe`: local knowledge/web-search probe.
 - `POST /api/operators/weather/probe`: weather probe with Open-Meteo fallback when no key is set.
 - `POST /api/operators/local_artifacts/probe`: real local artifact side effect.
-- `POST /demo/fire`: asynchronous three-signal autonomous mission.
+- `POST /demo/fire`: deprecated compatibility alias for `/api/monitoring/check`; it no longer emits a canned export-service incident.

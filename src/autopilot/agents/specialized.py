@@ -239,28 +239,115 @@ class SecurityAuditAgent(ScopedAgent):
         pr_number = pull_request.get("number") or payload.get("number") or payload.get("pr") or "unknown"
         title = pull_request.get("title") or payload.get("title") or "Pull request"
         branch = (pull_request.get("head") or {}).get("ref") if isinstance(pull_request.get("head"), dict) else None
-        changed_files = payload.get("changed_files") or payload.get("files") or []
-        file_lines = [f"- {item}" for item in changed_files[:20]] if isinstance(changed_files, list) else ["- Not provided"]
+        changed_files: list[str] = payload.get("changed_files") or payload.get("files") or []
+        if not isinstance(changed_files, list):
+            changed_files = []
 
-        return "\n".join(
-            [
-                "# Security Audit",
-                "",
-                f"Repository: {repo_name}",
-                f"Pull request: #{pr_number} - {title}",
-                f"Branch: {branch or 'unknown'}",
-                f"Trigger: {payload.get('trigger', 'pr_open')}",
-                "",
-                "## Checks",
-                "- Authentication and authorization paths reviewed from provided metadata.",
-                "- Secret exposure risk checked against changed-file names supplied in payload.",
-                "- Dependency or infrastructure-sensitive paths flagged for human review when present.",
-                "",
-                "## Changed Files",
-                *file_lines,
-                "",
-                "## Output Contract",
-                "This agent writes a durable local audit artifact and emits an ops notification when configured.",
-            ]
-        )
+        # ── Real pattern-based analysis ─────────────────────────────────────
+
+        # Risk patterns: category → (patterns, severity, description)
+        RISK_PATTERNS = {
+            "SECRET_EXPOSURE": (
+                [".env", "secret", "credential", "api_key", "apikey", "password", "passwd",
+                 "token", "private_key", "id_rsa", "id_ed25519", ".pem", ".p12", ".pfx",
+                 "keystore", "vault", "htpasswd"],
+                "CRITICAL",
+                "File may contain or expose secrets, credentials, or private keys.",
+            ),
+            "AUTH_AND_ACCESS": (
+                ["auth", "login", "oauth", "jwt", "session", "cookie", "permission",
+                 "acl", "rbac", "middleware/auth", "guard", "policy", "access_control"],
+                "HIGH",
+                "Authentication or authorization logic changed — requires security review.",
+            ),
+            "INFRASTRUCTURE": (
+                ["dockerfile", "docker-compose", ".terraform", "helm/", "k8s/",
+                 "kubernetes", "nginx.conf", "apache", "ingress", "network",
+                 "firewall", "security_group", "iam", "aws_", "gcp_", "azure_"],
+                "HIGH",
+                "Infrastructure or cloud configuration changed — check for open ports or role escalation.",
+            ),
+            "DEPENDENCY": (
+                ["package.json", "package-lock.json", "yarn.lock", "requirements.txt",
+                 "pyproject.toml", "poetry.lock", "go.sum", "go.mod", "gemfile",
+                 "gemfile.lock", "cargo.toml", "cargo.lock", "build.gradle", "pom.xml"],
+                "MEDIUM",
+                "Dependency manifest changed — check for known-vulnerable or unexpected packages.",
+            ),
+            "DATA_MIGRATION": (
+                ["migration", "migrate", "schema", "alembic", "flyway", "liquibase",
+                 "seed", "fixtures", ".sql"],
+                "MEDIUM",
+                "Database schema or migration changed — check for data loss or backwards-incompatibility.",
+            ),
+            "CI_CD_PIPELINE": (
+                [".github/workflows", ".gitlab-ci", "jenkinsfile", ".circleci",
+                 "bitbucket-pipelines", ".travis.yml", "cloudbuild"],
+                "MEDIUM",
+                "CI/CD pipeline configuration changed — verify no unintended secret exposure or elevated permissions.",
+            ),
+            "ENCRYPTION_CRYPTO": (
+                ["crypto", "encrypt", "decrypt", "hash", "hmac", "tls", "ssl",
+                 "certificate", "cipher", "signing", "pgp"],
+                "HIGH",
+                "Cryptographic code changed — verify algorithm correctness and key management.",
+            ),
+        }
+
+        flagged: dict[str, list[str]] = {}  # category → matched files
+        all_findings: list[str] = []
+
+        for filepath in changed_files:
+            fp_lower = str(filepath).lower()
+            for category, (patterns, severity, _) in RISK_PATTERNS.items():
+                if any(p in fp_lower for p in patterns):
+                    flagged.setdefault(category, []).append(str(filepath))
+
+        # Build findings section
+        if flagged:
+            for category, files in sorted(flagged.items(), key=lambda x: RISK_PATTERNS[x[0]][1]):
+                _, severity, desc = RISK_PATTERNS[category]
+                all_findings.append(f"### [{severity}] {category.replace('_', ' ').title()}")
+                all_findings.append(f"  {desc}")
+                for f in files[:10]:
+                    all_findings.append(f"  - `{f}`")
+                all_findings.append("")
+        else:
+            all_findings.append("No high-risk file patterns detected in the changed file list.")
+
+        # Overall risk level
+        if "SECRET_EXPOSURE" in flagged or "ENCRYPTION_CRYPTO" in flagged:
+            overall = "CRITICAL — Immediate review required before merge."
+        elif any(c in flagged for c in ["AUTH_AND_ACCESS", "INFRASTRUCTURE"]):
+            overall = "HIGH — Security team review strongly recommended."
+        elif flagged:
+            overall = "MEDIUM — Standard security review applies."
+        else:
+            overall = "LOW — No high-risk patterns detected; proceed with normal review."
+
+        file_lines = [f"- `{item}`" for item in changed_files[:25]] if changed_files else ["- Not provided"]
+
+        lines = [
+            "# AUTOPILOT Security Audit",
+            "",
+            f"**Repository:** {repo_name}",
+            f"**Pull Request:** #{pr_number} — {title}",
+            f"**Branch:** {branch or 'unknown'}",
+            f"**Trigger:** {payload.get('trigger', 'pr_open')}",
+            f"**Overall Risk:** {overall}",
+            "",
+            "## Risk Findings",
+            "",
+        ]
+        lines.extend(all_findings)
+        lines += [
+            "## Changed Files",
+            "",
+            *file_lines,
+            "",
+            "## Output Contract",
+            "This agent writes a durable local audit artifact and emits an ops notification when configured.",
+            "Findings are based on static file-path pattern analysis of the payload's changed_files list.",
+        ]
+        return "\n".join(lines)
 

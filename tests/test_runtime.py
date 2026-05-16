@@ -1,6 +1,7 @@
 import asyncio
 import hashlib
 import hmac
+import json
 import os
 import unittest
 from pathlib import Path
@@ -274,6 +275,99 @@ class RuntimeKernelTest(unittest.TestCase):
         slack = next(item for item in directory.list() if item["id"] == "slack")
         self.assertFalse(slack["live_connected"])
         self.assertTrue(slack["is_demo_connection"])
+
+    def test_api_connect_connector_uses_default_user_not_auth_mode_as_user_id(self):
+        old_store, old_directory = api_main.store, api_main.directory
+        tmp = Path.cwd() / ".tmp"
+        tmp.mkdir(exist_ok=True)
+        store = Store(tmp / f"autopilot-{uuid4().hex}.db")
+        api_main.store = store
+        api_main.directory = ConnectorDirectory(store)
+        try:
+            client = TestClient(api_main.app)
+            response = client.post("/api/connector-directory/slack/connect", json={"auth_mode": "demo"})
+            self.assertEqual(response.status_code, 200, response.text)
+            default_connection = store.get_connector_connection("slack", "default_user")
+            self.assertIsNotNone(default_connection)
+            self.assertEqual(default_connection.user_id, "default_user")
+            self.assertEqual(default_connection.auth_mode, AuthMode.DEMO)
+            self.assertIsNone(store.get_connector_connection("slack", "demo"))
+        finally:
+            api_main.store, api_main.directory = old_store, old_directory
+
+    def test_monitoring_check_inspects_connected_services_without_canned_export_demo(self):
+        old_store, old_registry, old_directory, old_runtime = (
+            api_main.store,
+            api_main.registry,
+            api_main.directory,
+            api_main.runtime,
+        )
+        tmp = Path.cwd() / ".tmp"
+        tmp.mkdir(exist_ok=True)
+        store = Store(tmp / f"autopilot-{uuid4().hex}.db")
+        registry = default_registry()
+        api_main.store = store
+        api_main.registry = registry
+        api_main.directory = ConnectorDirectory(store)
+        api_main.runtime = RuntimeKernel(store, registry, correlation_window_seconds=0.01)
+        api_main.directory.connect("local_artifacts", auth_mode=AuthMode.NONE)
+        try:
+            client = TestClient(api_main.app)
+            response = client.post("/api/monitoring/check", json={})
+            self.assertEqual(response.status_code, 200, response.text)
+            body = response.json()
+            self.assertEqual(body["status"], "complete")
+            self.assertEqual(body["targets"], 1)
+            self.assertEqual(body["checks"][0]["id"], "local_artifacts")
+            self.assertEqual(body["checks"][0]["status"], "healthy")
+            self.assertEqual(body["issues"], [])
+            self.assertIsNone(body["mission_id"])
+            serialized = json.dumps(body).lower()
+            self.assertNotIn("export service", serialized)
+            self.assertNotIn("failed exports", serialized)
+        finally:
+            api_main.store, api_main.registry, api_main.directory, api_main.runtime = (
+                old_store,
+                old_registry,
+                old_directory,
+                old_runtime,
+            )
+
+    def test_legacy_demo_endpoint_is_monitoring_alias_without_export_hardcoding(self):
+        old_store, old_registry, old_directory, old_runtime = (
+            api_main.store,
+            api_main.registry,
+            api_main.directory,
+            api_main.runtime,
+        )
+        tmp = Path.cwd() / ".tmp"
+        tmp.mkdir(exist_ok=True)
+        store = Store(tmp / f"autopilot-{uuid4().hex}.db")
+        registry = default_registry()
+        api_main.store = store
+        api_main.registry = registry
+        api_main.directory = ConnectorDirectory(store)
+        api_main.runtime = RuntimeKernel(store, registry, correlation_window_seconds=0.01)
+        api_main.directory.connect("local_artifacts", auth_mode=AuthMode.NONE)
+        try:
+            client = TestClient(api_main.app)
+            response = client.post("/demo/fire", json={})
+            self.assertEqual(response.status_code, 200, response.text)
+            body = response.json()
+            self.assertTrue(body["deprecated"])
+            self.assertEqual(body["source"], "legacy_demo_endpoint")
+            self.assertIsNone(body["mission_id"])
+            self.assertEqual(body["checks"][0]["id"], "local_artifacts")
+            serialized = json.dumps(body).lower()
+            self.assertNotIn("failed exports", serialized)
+            self.assertNotIn("export job", serialized)
+        finally:
+            api_main.store, api_main.registry, api_main.directory, api_main.runtime = (
+                old_store,
+                old_registry,
+                old_directory,
+                old_runtime,
+            )
 
     def test_operator_catalog_exposes_configured_and_unconfigured_operators(self):
         old_store, old_registry, old_directory = api_main.store, api_main.registry, api_main.directory

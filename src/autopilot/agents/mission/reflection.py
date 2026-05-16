@@ -95,9 +95,11 @@ class ReflectionAgent:
                 )
 
             if isinstance(adj_conf, (int, float)) and 0.0 <= adj_conf <= 1.0:
-                # Blend: take the max of current and reflection-adjusted confidence
-                # to avoid regressing a high-confidence run due to LLM hedging.
-                mission.confidence = max(mission.confidence, float(adj_conf))
+                # Weighted blend: 60% prior, 40% reflection.
+                # Using a blend (not max) so reflection can LOWER confidence
+                # when it finds contradictions — avoiding a one-way ratchet.
+                blended = 0.6 * mission.confidence + 0.4 * float(adj_conf)
+                mission.confidence = round(min(0.96, max(0.1, blended)), 2)
 
             log.info(
                 "ReflectionAgent: root_cause=%.80s confidence=%.2f",

@@ -26,6 +26,16 @@ from autopilot.operators.llm import parse_json, reason
 
 log = logging.getLogger("autopilot.agents")
 
+# Lazy reference to the Omium TraceSink — set by the RuntimeKernel on startup.
+# Kept as module-level to avoid circular imports between agents and tracing.
+_omium_sink: Any = None
+
+
+def set_omium_sink(sink: Any) -> None:
+    """Register the Omium TraceSink for agent-step traces. Called from RuntimeKernel."""
+    global _omium_sink
+    _omium_sink = sink
+
 
 # ---------------------------------------------------------------------------
 # Data classes
@@ -247,6 +257,22 @@ class SubAgent:
                 tool = self.tools[tool_name]
                 tool_result = await tool.execute(**tool_input)
                 tool_calls += 1
+
+                # Emit structured Omium trace for every tool invocation
+                if _omium_sink is not None:
+                    try:
+                        _omium_sink.emit_agent_step(
+                            mission_id=getattr(self, "_mission_id", None),
+                            agent_id=self.id,
+                            agent_role=self.role,
+                            step_number=step_num,
+                            tool_name=tool_name,
+                            status="complete" if tool_result.success else "failed",
+                            duration_ms=tool_result.duration_ms,
+                            result_summary=str(tool_result.output)[:200] if tool_result.success else tool_result.error,
+                        )
+                    except Exception:
+                        pass  # Tracing must never crash the agent
 
                 # Extract any reasoning text the LLM provided before the tool call
                 # LLMs often include a 'thought' or 'reasoning' key alongside 'action'

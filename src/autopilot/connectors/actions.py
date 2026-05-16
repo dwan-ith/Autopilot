@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import os
 from pathlib import Path
 
@@ -9,6 +10,8 @@ import httpx
 from autopilot.connectors.base import Connector
 from autopilot.models import ActionResult, ActionRisk, Capability, ConnectorManifest, ConnectorToolSpec
 from autopilot.storage import ARTIFACT_DIR
+
+log = logging.getLogger(__name__)
 
 
 class ArtifactConnector(Connector):
@@ -91,9 +94,9 @@ class ArtifactConnector(Connector):
 class NotificationConnector(Connector):
     manifest = ConnectorManifest(
         name="notification",
-        description="Sends bounded outbound notifications through Slack webhook when configured, otherwise logs locally.",
+        description="Sends bounded outbound notifications through Slack (Web API or Webhook) when configured, otherwise logs locally.",
         category="Communication",
-        auth_mode="webhook",
+        auth_mode="api_key",
         capabilities=[Capability.NOTIFY, Capability.ACTION],
         scopes=["chat.write"],
         objects=["messages", "incident updates"],
@@ -104,7 +107,7 @@ class NotificationConnector(Connector):
                 name="slack_notify_ops",
                 description="Send an approved operational notification to Slack or local fallback.",
                 capability=Capability.NOTIFY,
-                input_schema={"mission_id": "Mission id", "text": "Notification text"},
+                input_schema={"mission_id": "Mission id", "text": "Notification text", "channel": "Optional channel ID or name"},
                 output="ActionResult",
                 risk=ActionRisk.MEDIUM,
                 requires_confirmation=True,
@@ -120,7 +123,7 @@ class NotificationConnector(Connector):
                 requires_confirmation=True,
             ),
         ],
-        reliability_score=0.9,
+        reliability_score=0.92,
         auth_required=False,
     )
 
@@ -135,15 +138,28 @@ class NotificationConnector(Connector):
                 "action": action,
                 "integration_live": False,
             }
-        mode = "slack" if os.getenv("SLACK_WEBHOOK_URL") else "local_fallback"
+        
+        has_token = bool(os.getenv("SLACK_ACCESS_TOKEN"))
+        has_webhook = bool(os.getenv("SLACK_WEBHOOK_URL"))
+        channel_env = os.getenv("SLACK_DEFAULT_CHANNEL", "").strip()
+        channel_warning = None
+
+        if has_token and not channel_env:
+            channel_warning = (
+                "SLACK_DEFAULT_CHANNEL is not set. Defaulting to '#ops'. "
+                "Set SLACK_DEFAULT_CHANNEL to your workspace channel name."
+            )
+
+        mode = "slack_api" if has_token else ("slack_webhook" if has_webhook else "local_fallback")
         return {
             "configured": True,
             "action_ready": True,
             "missing": [],
             "mode": mode,
-            "detail": "Slack webhook is configured." if mode == "slack" else "Will write local notification artifacts.",
+            "detail": f"Slack {mode.split('_')[1]} active." if mode != "local_fallback" else "Will write local notification artifacts.",
             "action": action,
-            "integration_live": mode == "slack",
+            "integration_live": mode != "local_fallback",
+            "channel_warning": channel_warning,
         }
 
     async def action(self, name: str, payload: dict) -> ActionResult:
@@ -178,27 +194,56 @@ class NotificationConnector(Connector):
                     metadata={"mode": "webhook_callback"},
                 )
 
-        slack_url = os.getenv("SLACK_WEBHOOK_URL")
-        if slack_url:
+        # Slack Logic
+        token = os.getenv("SLACK_ACCESS_TOKEN")
+        webhook_url = os.getenv("SLACK_WEBHOOK_URL")
+        text = payload.get("text", json.dumps(payload))
+        
+        if token:
+            channel = payload.get("channel") or os.getenv("SLACK_DEFAULT_CHANNEL", "#ops")
             try:
                 async with httpx.AsyncClient(timeout=10) as client:
-                    response = await client.post(slack_url, json={"text": payload.get("text", json.dumps(payload))})
+                    resp = await client.post(
+                        "https://slack.com/api/chat.postMessage",
+                        headers={"Authorization": f"Bearer {token}", "Content-Type": "application/json"},
+                        json={"channel": channel, "text": text}
+                    )
+                    data = resp.json()
+                    if not data.get("ok"):
+                        slack_err = data.get("error", "unknown_error")
+                        if slack_err == "channel_not_found":
+                            log.error(
+                                "Slack channel_not_found: channel does not exist. "
+                                "Set SLACK_DEFAULT_CHANNEL to a valid channel name."
+                            )
+                        else:
+                            log.error("Slack API error: %s", slack_err)
+                        raise Exception(f"Slack API error: {slack_err}")
+                return ActionResult(
+                    connector=self.manifest.name,
+                    action=name,
+                    status="complete",
+                    summary=f"Posted notification to Slack channel {channel} via API.",
+                    metadata={"mode": "slack_api", "channel": channel, "ts": data.get("ts")},
+                )
+            except Exception as exc:
+                log.error("Slack API notification failed: %s", exc)
+                # Fall through to webhook if available
+
+        if webhook_url:
+            try:
+                async with httpx.AsyncClient(timeout=10) as client:
+                    response = await client.post(webhook_url, json={"text": text})
                     response.raise_for_status()
                 return ActionResult(
                     connector=self.manifest.name,
                     action=name,
                     status="complete",
                     summary="Posted notification to Slack webhook.",
-                    metadata={"mode": "slack"},
+                    metadata={"mode": "slack_webhook"},
                 )
             except Exception as exc:
-                return ActionResult(
-                    connector=self.manifest.name,
-                    action=name,
-                    status="failed",
-                    summary=f"Slack notification failed: {exc}",
-                    metadata={"mode": "slack"},
-                )
+                log.error("Slack webhook notification failed: %s", exc)
 
         path = ARTIFACT_DIR / f"notification-{payload.get('mission_id', 'unknown')}.json"
         path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
@@ -206,7 +251,7 @@ class NotificationConnector(Connector):
             connector=self.manifest.name,
             action=name,
             status="complete",
-            summary="No Slack webhook configured; wrote local notification artifact.",
+            summary="Slack not configured or failed; wrote local notification artifact.",
             artifact_path=str(Path(path)),
             metadata={"mode": "local_fallback"},
         )

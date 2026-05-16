@@ -74,6 +74,7 @@ registry = default_registry()
 directory = ConnectorDirectory(store)
 
 runtime = RuntimeKernel(store, registry)
+monitor_task: asyncio.Task | None = None
 
 
 def _frontend_redirect(query: str) -> RedirectResponse:
@@ -236,7 +237,20 @@ async def lifespan(app: FastAPI):
     except Exception:
         # Be conservative on startup — errors should not prevent the app from running.
         pass
-    yield
+    global monitor_task
+    if os.getenv("AUTOPILOT_PERSISTENT_MONITORING", "").lower() in {"1", "true", "yes"}:
+        monitor_task = asyncio.create_task(_monitor_connected_services_loop())
+        store.trace(None, "monitor.started", "started", {"interval_seconds": _monitor_interval_seconds()})
+    try:
+        yield
+    finally:
+        if monitor_task and not monitor_task.done():
+            monitor_task.cancel()
+            try:
+                await monitor_task
+            except asyncio.CancelledError:
+                pass
+            store.trace(None, "monitor.stopped", "complete", {})
 
 app = FastAPI(
     title="AUTOPILOT",
@@ -424,6 +438,114 @@ async def probe_operator(connector_id: str, request: Request, payload: dict[str,
         store.trace(None, "operator.probe.failed", "failed", response)
         return response
 
+
+def _monitor_interval_seconds() -> int:
+    try:
+        configured = int(os.getenv("AUTOPILOT_MONITOR_INTERVAL_SECONDS", "300"))
+    except ValueError:
+        configured = 300
+    return max(30, configured)
+
+
+def _monitor_targets() -> list[dict[str, Any]]:
+    """Connected services the persistent monitor should watch.
+
+    This intentionally uses the connector directory state, not a canned export
+    incident. Demo/fallback connections are reported as monitored fallback
+    services, but missing credentials only create missions when a connector is
+    explicitly connected and not action/search ready.
+    """
+    targets: list[dict[str, Any]] = []
+    for item in directory.list():
+        if item.get("status") == "connected" or item.get("live_connected") or item.get("oauth_token_present"):
+            targets.append(item)
+    return targets
+
+
+async def _run_connected_service_monitor(source: str) -> dict[str, Any]:
+    started = time.monotonic()
+    targets = _monitor_targets()
+    checks: list[dict[str, Any]] = []
+    issues: list[dict[str, Any]] = []
+
+    for item in targets:
+        connector_id = item["id"]
+        try:
+            connector = _connector_for_operator(connector_id)
+            readiness = connector.readiness()
+            mode = str(readiness.get("mode") or "")
+            live = bool(readiness.get("integration_live") or item.get("live_connected") or item.get("oauth_token_present"))
+            fallback = bool(item.get("is_demo_connection") or mode.endswith("fallback") or mode in {"anonymous_public", "webhook_only"})
+            healthy = bool(readiness.get("configured") and readiness.get("action_ready"))
+            status = "healthy" if healthy else "degraded"
+            if healthy and fallback and not live:
+                status = "fallback"
+            check = {
+                "id": connector_id,
+                "name": item.get("name", connector_id),
+                "runtime_name": connector.manifest.name,
+                "status": status,
+                "live": live,
+                "fallback": fallback,
+                "readiness": readiness,
+            }
+            checks.append(check)
+            if not healthy:
+                issues.append(check)
+        except Exception as exc:
+            issue = {
+                "id": connector_id,
+                "name": item.get("name", connector_id),
+                "status": "failed",
+                "live": False,
+                "fallback": False,
+                "error": str(exc),
+            }
+            checks.append(issue)
+            issues.append(issue)
+
+    mission_id: str | None = None
+    if issues:
+        names = [str(issue.get("name") or issue.get("id")) for issue in issues]
+        signal = Signal(
+            source="autopilot_monitor",
+            type="connected_service.degraded",
+            summary=f"Connected service monitoring found {len(issues)} service(s) needing attention: {', '.join(names[:5])}.",
+            entities=[str(issue.get("id")) for issue in issues],
+            urgency="high" if any(issue.get("live") for issue in issues) else "medium",
+            payload={"source": source, "checks": checks, "issues": issues},
+            idempotency_key=f"monitor:{hashlib.sha256(json.dumps(issues, sort_keys=True, default=str).encode()).hexdigest()[:16]}",
+        )
+        mission = await runtime.ingest(signal)
+        mission_id = mission.id
+
+    result = {
+        "status": "complete",
+        "source": source,
+        "duration_ms": round((time.monotonic() - started) * 1000, 1),
+        "targets": len(targets),
+        "checks": checks,
+        "issues": issues,
+        "mission_id": mission_id,
+    }
+    store.trace(None, "monitor.connected_services.check", "complete", result)
+    return result
+
+
+async def _monitor_connected_services_loop() -> None:
+    while True:
+        try:
+            await _run_connected_service_monitor("persistent_loop")
+        except Exception as exc:
+            store.trace(None, "monitor.connected_services.failed", "failed", {"error": str(exc)})
+        await asyncio.sleep(_monitor_interval_seconds())
+
+
+@app.post("/api/monitoring/check")
+async def monitor_connected_services(request: Request) -> dict[str, Any]:
+    require_write_access(request)
+    return await _run_connected_service_monitor("manual")
+
 @app.post("/api/connector-directory/{connector_id}/connect")
 async def connect_connector(connector_id: str, request: Request, payload: dict[str, Any] | None = None) -> dict[str, Any]:
     require_write_access(request)
@@ -433,7 +555,7 @@ async def connect_connector(connector_id: str, request: Request, payload: dict[s
             auth_mode = AuthMode(payload["auth_mode"])
         connection = directory.connect(
             connector_id,
-            auth_mode,
+            auth_mode=auth_mode,
             credentials_ref=(payload or {}).get("credentials_ref"),
             metadata=(payload or {}).get("metadata") or {},
         )
@@ -502,47 +624,14 @@ async def create_signal(signal_request: WebhookSignalRequest, request: Request) 
 
 @app.post("/demo/fire")
 async def fire_demo(request: Request) -> dict[str, Any]:
+    """Legacy endpoint: run connected-service monitoring, not a canned incident."""
     require_write_access(request)
-    run_id = new_id("demo")
-    first = Signal(
-        source="support_webhook",
-        type="support_escalation",
-        summary="Enterprise customer reports failed exports after today's rollout.",
-        entities=["export service", "enterprise customer", "rollout"],
-        urgency="high",
-        payload={"customer": "Northstar Analytics", "channel": "support", "run_id": run_id},
-        idempotency_key=f"{run_id}:support",
-    )
-    mission = await runtime.ingest(first)
-
-    async def delayed_events() -> None:
-        await asyncio.sleep(0.1)
-        await runtime.ingest(
-            Signal(
-                source="monitoring_webhook",
-                type="error_spike",
-                summary="Export job failures increased from 1% to 38% in the last 20 minutes.",
-                entities=["export service", "job failures"],
-                urgency="high",
-                payload={"metric": "export_job_failure_rate", "value": 0.38, "run_id": run_id},
-                idempotency_key=f"{run_id}:monitoring",
-            )
-        )
-        await asyncio.sleep(0.1)
-        await runtime.ingest(
-            Signal(
-                source="status_webhook",
-                type="rollout_status",
-                summary="Experimental export pipeline was enabled for enterprise accounts earlier today.",
-                entities=["export service", "rollout", "enterprise customer"],
-                urgency="medium",
-                payload={"flag": "experimental_export_pipeline", "state": "enabled", "run_id": run_id},
-                idempotency_key=f"{run_id}:status",
-            )
-        )
-
-    asyncio.create_task(delayed_events())
-    return {"started": True, "mission_id": mission.id, "run_id": run_id, "message": "Demo events are being emitted asynchronously."}
+    result = await _run_connected_service_monitor("legacy_demo_endpoint")
+    return {
+        **result,
+        "deprecated": True,
+        "message": "The canned export-service simulation was removed. This endpoint now checks connected services.",
+    }
 
 @app.get("/api/missions")
 async def list_missions(request: Request) -> list[dict[str, Any]]:
@@ -807,6 +896,78 @@ async def analytics_connectors(request: Request) -> list[dict]:
     # Sort: connectors with action history first, then alphabetically
     result.sort(key=lambda c: (-c["total"], c["connector"]))
     return result
+
+
+@app.get("/metrics")
+async def metrics(request: Request) -> dict[str, Any]:
+    """Real-time operational metrics for monitoring and observability.
+
+    Returns mission counts, agent performance, connector health, and LLM pool status.
+    Safe to scrape: read-only, no side effects.
+    """
+    require_read_access(request)
+    analytics = _StateStore(store.path)
+
+    # Mission stats
+    mission_data = analytics.mission_stats()
+
+    # Agent performance
+    agent_data = analytics.agent_performance()
+    total_tool_calls = sum(a["total_runs"] * a["avg_tool_calls"] for a in agent_data)
+    avg_failure_rate = (
+        sum(a["failure_rate"] for a in agent_data) / len(agent_data)
+        if agent_data else 0.0
+    )
+
+    # Connector health
+    connector_data = analytics.connector_health()
+    total_actions = sum(c["total"] for c in connector_data)
+    failed_actions = sum(c["failed"] for c in connector_data)
+
+    # LLM pool health
+    from autopilot.operators.llm import active_provider_name, _BAD_SLOTS, _build_slots
+    all_slots = _build_slots()
+    quarantined_count = len(_BAD_SLOTS)
+    active_slot_count = len(all_slots) - quarantined_count
+
+    # Storage health
+    wal_writes = getattr(store, "_write_count", 0)
+
+    return {
+        "status": "ok",
+        "missions": {
+            "total": mission_data.get("total", 0),
+            "by_status": mission_data.get("by_status", {}),
+            "avg_confidence": mission_data.get("avg_confidence", 0.0),
+            "avg_replans": mission_data.get("avg_replans", 0.0),
+            "avg_evidence_per_mission": mission_data.get("avg_evidence", 0.0),
+        },
+        "agents": {
+            "total_roles": len(agent_data),
+            "total_tool_calls": int(total_tool_calls),
+            "avg_failure_rate": round(avg_failure_rate, 4),
+            "by_role": agent_data,
+        },
+        "connectors": {
+            "total_actions": total_actions,
+            "failed_actions": failed_actions,
+            "action_failure_rate": round(failed_actions / total_actions, 4) if total_actions else 0.0,
+            "active_connectors": len(connector_data),
+        },
+        "llm_pool": {
+            "provider": active_provider_name(),
+            "total_slots_configured": len(all_slots),
+            "active_slots": active_slot_count,
+            "quarantined_slots": quarantined_count,
+            "quarantined_names": list(_BAD_SLOTS.keys()),
+        },
+        "storage": {
+            "wal_writes": wal_writes,
+            "wal_checkpoint_interval": getattr(store, "_wal_checkpoint_every", 50),
+        },
+    }
+
+
 
 
 @app.post("/webhooks/jira")

@@ -18,7 +18,6 @@ import {
   Layers,
   LayoutDashboard,
   Lock,
-  Play,
   Puzzle,
   ShieldCheck,
   Terminal,
@@ -93,7 +92,7 @@ export default function Dashboard() {
     approvals,
     provider,
     connection,
-    runDemo,
+    monitorConnectedServices,
     sendSignal,
     connectConnector,
     disconnectConnector,
@@ -103,7 +102,7 @@ export default function Dashboard() {
   } = useAutopilot();
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [currentView, setCurrentView] = useState<View>("dashboard");
-  const [isDemoRunning, setIsDemoRunning] = useState(false);
+  const [isMonitoring, setIsMonitoring] = useState(false);
   const [isSignalModalOpen, setIsSignalModalOpen] = useState(false);
 
   const selectedMission = useMemo(
@@ -152,11 +151,13 @@ export default function Dashboard() {
   const runningCount = missions.filter((m) => m.status === "running").length;
   const backendOffline = connection.status === "offline";
 
-  const handleRunDemo = async () => {
-    setIsDemoRunning(true);
-    await runDemo();
-    // Simulate a brief delay to show interaction feedback
-    setTimeout(() => setIsDemoRunning(false), 2000);
+  const handleMonitorConnectedServices = async () => {
+    setIsMonitoring(true);
+    try {
+      await monitorConnectedServices();
+    } finally {
+      setIsMonitoring(false);
+    }
   };
 
   return (
@@ -248,15 +249,15 @@ export default function Dashboard() {
               Manual Signal
             </button>
             <button
-              onClick={handleRunDemo}
-              disabled={isDemoRunning || backendOffline}
+              onClick={handleMonitorConnectedServices}
+              disabled={isMonitoring || backendOffline}
               className={cn(
                 "group relative flex items-center gap-2 overflow-hidden rounded-md bg-foreground px-4 py-1.5 text-[12px] font-bold text-background transition-all hover:opacity-90 active:scale-95 disabled:opacity-50",
-                isDemoRunning && "cursor-wait"
+                isMonitoring && "cursor-wait"
               )}
             >
               <AnimatePresence mode="wait">
-                {isDemoRunning ? (
+                {isMonitoring ? (
                   <motion.div
                     key="loading"
                     initial={{ y: 20 }}
@@ -265,7 +266,7 @@ export default function Dashboard() {
                     className="flex items-center gap-2"
                   >
                     <Activity className="h-3.5 w-3.5 animate-spin" />
-                    Simulating...
+                    Checking...
                   </motion.div>
                 ) : (
                   <motion.div
@@ -275,8 +276,8 @@ export default function Dashboard() {
                     exit={{ y: -20 }}
                     className="flex items-center gap-2"
                   >
-                    <Play className="h-3.5 w-3.5 fill-current" />
-                    Run Simulation
+                    <Activity className="h-3.5 w-3.5" />
+                    Check Services
                   </motion.div>
                 )}
               </AnimatePresence>
@@ -1431,6 +1432,8 @@ interface AgentPerf {
 
 interface ConnectorHealth {
   connector: string;
+  mode?: string;
+  detail?: string;
   total: number;
   complete: number;
   failed: number;

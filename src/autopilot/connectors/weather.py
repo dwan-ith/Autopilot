@@ -107,10 +107,14 @@ class WeatherConnector(Connector):
             return {"ref": ref, "error": str(e), "provider": "openweathermap"}
 
     def _normalize_location_query(self, ref: str) -> str:
-        cleaned = WEATHER_QUERY_WORDS.sub(" ", ref or "")
+        original = (ref or "").strip()
+        if not original:
+            return "London"  # explicit last-resort default — never silently empty
+        cleaned = WEATHER_QUERY_WORDS.sub(" ", original)
         cleaned = re.sub(r"\s+", " ", cleaned).strip(" ,.-")
-        cleaned = re.sub(r"^(in|near|for|at)\s+", "", cleaned, flags=re.IGNORECASE)
-        return cleaned or ref
+        cleaned = re.sub(r"^(in|near|for|at)\s+", "", cleaned, flags=re.IGNORECASE).strip()
+        # If stripping reduced the query to nothing, keep the original
+        return cleaned if cleaned else original
 
     async def _read_open_meteo(self, ref: str) -> dict[str, Any]:
         try:

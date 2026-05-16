@@ -183,3 +183,28 @@ export interface ConnectorDirectoryItem {
   /** Persisted demo / simulated connection row */
   is_demo_connection?: boolean;
 }
+
+export interface Operator {
+  id: string;
+  name: string;
+  runtime_name: string;
+  category: string;
+  description: string;
+  status: string;
+  implemented: boolean;
+  configured: boolean;
+  readiness: ConnectorReadiness & Record<string, unknown>;
+  capabilities: string[];
+  tools: ConnectorToolSpec[];
+  safe_actions: string[];
+}
+
+export interface OperatorProbeResult {
+  operator: string;
+  runtime_name: string;
+  kind: string;
+  status: string;
+  duration_ms: number;
+  output: unknown;
+  readiness?: ConnectorReadiness;
+}

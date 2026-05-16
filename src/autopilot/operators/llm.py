@@ -7,6 +7,7 @@ import json
 import logging
 import os
 import re
+import time
 from typing import Any
 
 import httpx
@@ -64,6 +65,7 @@ _ROLE_SLOT: dict[str, int] = {
 }
 
 _DISABLE_LLM = os.getenv("AUTOPILOT_DISABLE_LLM", "").lower() in {"1", "true", "yes"}
+_BAD_SLOTS: dict[str, tuple[float, str]] = {}
 
 
 def _build_slots() -> list[dict[str, Any]]:
@@ -77,6 +79,11 @@ def _build_slots() -> list[dict[str, Any]]:
 
 def _slots_for_role(role: str) -> list[dict[str, Any]]:
     all_slots = _build_slots()
+    now = time.time()
+    all_slots = [
+        slot for slot in all_slots
+        if _BAD_SLOTS.get(slot["name"], (0.0, ""))[0] <= now
+    ]
     if not all_slots:
         return []
     preferred = _ROLE_SLOT.get(role.lower().strip(), 0)
@@ -96,9 +103,17 @@ def active_provider_name() -> str:
     slots = _build_slots()
     if not slots:
         return "heuristic"
-    names = [slot["name"] for slot in slots]
+    now = time.time()
+    names = [
+        slot["name"] for slot in slots
+        if _BAD_SLOTS.get(slot["name"], (0.0, ""))[0] <= now
+    ]
+    if not names:
+        return "heuristic"
     suffix = "..." if len(names) > 3 else ""
-    return f"pool({len(names)}): {', '.join(names[:3])}{suffix}"
+    quarantined = len(slots) - len(names)
+    quarantine_note = f"; {quarantined} quarantined" if quarantined else ""
+    return f"pool({len(names)}): {', '.join(names[:3])}{suffix}{quarantine_note}"
 
 
 async def reason(
@@ -166,6 +181,9 @@ async def _call_slot(
                     log.warning("Rate-limit on slot %s; retrying in %.2fs", slot["name"], delay)
                     await asyncio.sleep(delay)
                     continue
+                if resp.status_code in {401, 402, 403}:
+                    _quarantine_slot(slot["name"], f"HTTP {resp.status_code}: {resp.text[:160]}")
+                    return None
                 resp.raise_for_status()
                 data = resp.json()
                 text = data["choices"][0]["message"]["content"]
@@ -183,6 +201,12 @@ async def _call_slot(
             log.error("LLM %s error: %s", slot["name"], exc)
             return None
     return None
+
+
+def _quarantine_slot(name: str, reason: str) -> None:
+    cooldown = max(30, int(os.getenv("AUTOPILOT_LLM_BAD_SLOT_COOLDOWN_SECONDS", "900")))
+    _BAD_SLOTS[name] = (time.time() + cooldown, reason)
+    log.error("LLM slot %s quarantined for %ss: %s", name, cooldown, reason)
 
 
 def _retry_delay(resp: httpx.Response, attempt: int) -> float:

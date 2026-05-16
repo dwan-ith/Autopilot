@@ -21,6 +21,7 @@ from autopilot.connectors import actions as action_connectors
 from autopilot.connectors.actions import ArtifactConnector, NotificationConnector
 from autopilot.connectors.base import Connector
 from autopilot.connectors import default_registry
+from autopilot.connectors.github_connector import GitHubConnector
 from autopilot.connectors.gmail import GmailConnector
 from autopilot.connectors.google_drive import GoogleDriveConnector
 from autopilot.connectors.knowledge import KnowledgeConnector
@@ -348,6 +349,27 @@ class RuntimeKernelTest(unittest.TestCase):
                 self.assertEqual(notion.status, "blocked")
         asyncio.run(scenario())
 
+    def test_github_search_query_deduplicates_repo_and_unsupported_terms(self):
+        old_repo = os.environ.get("GITHUB_REPO")
+        os.environ["GITHUB_REPO"] = "real/repo"
+        try:
+            query = GitHubConnector()._build_search_query("repo:fake/repo commits since:1h export failure")
+        finally:
+            if old_repo is None:
+                os.environ.pop("GITHUB_REPO", None)
+            else:
+                os.environ["GITHUB_REPO"] = old_repo
+        self.assertEqual(query, "export failure in:title,body repo:real/repo")
+        self.assertEqual(
+            GitHubConnector()._build_search_query(
+                "repo:fake/repo commits since:1h after:2024-07-24 :today export failure",
+                repo="",
+                use_default=False,
+                use_inline_repo=False,
+            ),
+            "export failure in:title,body",
+        )
+
     def test_weather_connector_has_no_key_fallback(self):
         old_key = os.environ.pop("OPENWEATHER_API_KEY", None)
         try:
@@ -358,6 +380,11 @@ class RuntimeKernelTest(unittest.TestCase):
         finally:
             if old_key:
                 os.environ["OPENWEATHER_API_KEY"] = old_key
+
+    def test_weather_connector_accepts_natural_weather_queries(self):
+        connector = WeatherConnector()
+        self.assertEqual(connector._normalize_location_query("Bengaluru weather"), "Bengaluru")
+        self.assertEqual(connector._normalize_location_query("current storm alerts in Mumbai"), "Mumbai")
 
     def test_artifact_action_packet_uses_canonical_action_name(self):
         async def scenario():

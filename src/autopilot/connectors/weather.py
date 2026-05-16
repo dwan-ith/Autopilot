@@ -10,6 +10,7 @@ Open-Meteo's no-key geocoding and forecast APIs so weather remains demoable.
 from __future__ import annotations
 
 import os
+import re
 from typing import Any
 
 import httpx
@@ -21,6 +22,10 @@ from autopilot.models import Capability, ConnectorManifest, ConnectorToolSpec, E
 WEATHER_API = "https://api.openweathermap.org/data/2.5"
 OPEN_METEO_GEOCODE = "https://geocoding-api.open-meteo.com/v1/search"
 OPEN_METEO_FORECAST = "https://api.open-meteo.com/v1/forecast"
+WEATHER_QUERY_WORDS = re.compile(
+    r"\b(weather|forecast|conditions|temperature|temp|rain|storm|storms|alerts?|current|today|tomorrow|now)\b",
+    re.IGNORECASE,
+)
 
 
 class WeatherConnector(Connector):
@@ -70,6 +75,7 @@ class WeatherConnector(Connector):
         }
 
     async def read(self, ref: str) -> dict[str, Any]:
+        ref = self._normalize_location_query(ref)
         if not self._configured():
             return await self._read_open_meteo(ref)
         try:
@@ -99,6 +105,12 @@ class WeatherConnector(Connector):
                 }
         except Exception as e:
             return {"ref": ref, "error": str(e), "provider": "openweathermap"}
+
+    def _normalize_location_query(self, ref: str) -> str:
+        cleaned = WEATHER_QUERY_WORDS.sub(" ", ref or "")
+        cleaned = re.sub(r"\s+", " ", cleaned).strip(" ,.-")
+        cleaned = re.sub(r"^(in|near|for|at)\s+", "", cleaned, flags=re.IGNORECASE)
+        return cleaned or ref
 
     async def _read_open_meteo(self, ref: str) -> dict[str, Any]:
         try:

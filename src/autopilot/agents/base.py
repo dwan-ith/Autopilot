@@ -16,6 +16,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import os
 import time
 from dataclasses import dataclass, field
 from typing import Any
@@ -152,7 +153,8 @@ class SubAgent:
         self.id = f"agent_{uuid4().hex[:8]}"
         self.role = role
         self.tools = {tool.name: tool for tool in tools}
-        self.max_steps = max_steps
+        env_steps = os.getenv("AUTOPILOT_SUBAGENT_MAX_STEPS", "").strip()
+        self.max_steps = max(1, int(env_steps)) if env_steps else max_steps
         self.temperature = temperature
         self.system_prompt = system_prompt.strip()
 

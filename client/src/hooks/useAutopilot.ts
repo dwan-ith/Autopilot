@@ -1,6 +1,6 @@
 import { useState, useEffect, useCallback } from "react";
 import axios from "axios";
-import { Mission, Trace, Connector, ConnectorDirectoryItem, ActionApproval } from "@/types";
+import { Mission, Trace, Connector, ConnectorDirectoryItem, ActionApproval, Operator, OperatorProbeResult } from "@/types";
 
 const API_BASE = process.env.NEXT_PUBLIC_API_URL || "";
 const API_KEY = process.env.NEXT_PUBLIC_AUTOPILOT_API_KEY || "";
@@ -40,30 +40,45 @@ export function useAutopilot() {
   const [traces, setTraces] = useState<Trace[]>([]);
   const [connectors, setConnectors] = useState<Connector[]>([]);
   const [connectorDirectory, setConnectorDirectory] = useState<ConnectorDirectoryItem[]>([]);
+  const [operators, setOperators] = useState<Operator[]>([]);
+  const [operatorProbeResults, setOperatorProbeResults] = useState<Record<string, OperatorProbeResult>>({});
   const [approvals, setApprovals] = useState<ActionApproval[]>([]);
   const [connection, setConnection] = useState<BackendConnection>(initialConnection);
   const [isLoading, setIsLoading] = useState(true);
 
   const fetchStaticData = useCallback(async () => {
     try {
-      const [healthRes, connRes, dirRes, provRes] = await Promise.all([
+      const [healthRes, connRes, dirRes, operatorsRes, provRes] = await Promise.all([
         axios.get(`${API_BASE}/health`),
         axios.get(`${API_BASE}/api/connectors`),
         axios.get(`${API_BASE}/api/connector-directory`),
+        axios.get(`${API_BASE}/api/operators`),
         axios.get(`${API_BASE}/api/provider`),
       ]);
 
       let approvalsData: ActionApproval[] = [];
+      let missionsData: Mission[] = [];
+      let tracesData: Trace[] = [];
+
       try {
-        const approvalsRes = await axios.get(`${API_BASE}/api/approvals`, readConfig);
-        approvalsData = approvalsRes.data;
+        const [apprRes, missRes, tracRes] = await Promise.all([
+          axios.get(`${API_BASE}/api/approvals`, readConfig),
+          axios.get(`${API_BASE}/api/missions`, readConfig),
+          axios.get(`${API_BASE}/api/traces`, readConfig),
+        ]);
+        approvalsData = apprRes.data;
+        missionsData = missRes.data;
+        tracesData = tracRes.data;
       } catch {
-        /* /api/approvals requires AUTOPILOT_API_KEY when set; connector hub must still refresh without it */
+        /* These endpoints require AUTOPILOT_API_KEY when set; dashboard must still refresh public data without it */
       }
 
       setConnectors(connRes.data);
       setConnectorDirectory(dirRes.data);
+      setOperators(operatorsRes.data);
       setApprovals(approvalsData);
+      setMissions(missionsData);
+      setTraces(tracesData);
       setConnection((current) => ({
         ...current,
         status: current.sseConnected ? "connected" : "degraded",
@@ -219,11 +234,23 @@ export function useAutopilot() {
     }
   };
 
+  const probeOperator = async (operatorId: string) => {
+    const response = await axios.post<OperatorProbeResult>(
+      `${API_BASE}/api/operators/${operatorId}/probe`,
+      {},
+      writeConfig,
+    );
+    setOperatorProbeResults((current) => ({ ...current, [operatorId]: response.data }));
+    await fetchStaticData();
+  };
+
   return {
     missions,
     traces,
     connectors,
     connectorDirectory,
+    operators,
+    operatorProbeResults,
     approvals,
     provider: connection.provider,
     connection,
@@ -234,6 +261,7 @@ export function useAutopilot() {
     disconnectConnector,
     approveAction,
     rejectAction,
+    probeOperator,
     refresh: fetchStaticData,
   };
 }

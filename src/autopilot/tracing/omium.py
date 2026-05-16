@@ -32,6 +32,7 @@ from autopilot.storage import Store
 
 log = logging.getLogger("autopilot.tracing")
 
+DEFAULT_OMIUM_RELAY_URL = "https://api.omium.ai/api/v1/traces" # Legacy/Placeholder
 
 class TraceSink:
     """Emits trace events to SQLite (always) and optionally to a remote HTTP relay.
@@ -153,7 +154,7 @@ class TraceSink:
 
         try:
             async with httpx.AsyncClient(timeout=5) as client:
-                await client.post(
+                resp = await client.post(
                     self._http_url,
                     headers={
                         "X-API-Key": self._api_key,
@@ -162,6 +163,9 @@ class TraceSink:
                     },
                     content=json.dumps(event, default=str),
                 )
+                if resp.status_code >= 400:
+                    log.warning("Omium ingest returned HTTP %s; disabling remote tracing for this process", resp.status_code)
+                    self._http_enabled = False
         except Exception as exc:
             log.debug("Omium HTTP ingest failed (non-critical): %s", exc)
 

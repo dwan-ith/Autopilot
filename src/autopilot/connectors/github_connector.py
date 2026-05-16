@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import logging
 import os
+import re
 from typing import Any
 
 import httpx
@@ -36,6 +37,11 @@ from pathlib import Path
 log = logging.getLogger("autopilot.connectors.github")
 
 GITHUB_API = "https://api.github.com"
+REPO_QUALIFIER = re.compile(r"\brepo:[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+\b")
+UNSUPPORTED_ISSUE_QUALIFIERS = re.compile(
+    r"\b(commits?|commit|since:\S+|after:\S+|before:\S+|pushed:\S+)\b|(?<!\w):\S+",
+    re.IGNORECASE,
+)
 
 
 def _token() -> str | None:
@@ -227,29 +233,30 @@ class GitHubConnector(Connector):
         Works anonymously for public repos (60 req/hr). Token enables private repos.
         """
         target = repo or self._default_repo()
-        search_query = f"{query} in:title,body"
-        if target:
-            search_query += f" repo:{target}"
+        search_query = self._build_search_query(query, repo)
 
         results: list[Evidence] = []
         try:
             async with httpx.AsyncClient(timeout=15) as client:
-                resp = await client.get(
-                    f"{GITHUB_API}/search/issues",
-                    headers=await self._headers(),
-                    params={"q": search_query, "per_page": 5, "sort": "updated"},
-                )
-                resp.raise_for_status()
-                data = resp.json()
+                headers = await self._headers()
+                data = await self._search_issues(client, search_query, headers)
+        except httpx.HTTPStatusError as exc:
+            if target and exc.response.status_code == 422:
+                try:
+                    fallback_query = self._build_search_query(query, repo="", use_default=False, use_inline_repo=False)
+                    log.warning("GitHub scoped search rejected; retrying unscoped query: %s", fallback_query)
+                    async with httpx.AsyncClient(timeout=15) as client:
+                        headers = await self._headers()
+                        data = await self._search_issues(client, fallback_query, headers)
+                except Exception as fallback_exc:
+                    log.error("GitHub fallback search failed: %s", fallback_exc)
+                    return []
+            else:
+                log.error("GitHub search failed: %s", exc)
+                return []
         except Exception as exc:
             log.error("GitHub search failed: %s", exc)
-            return [Evidence(
-                source="github",
-                title="GitHub search failed",
-                summary=str(exc),
-                confidence=0.1,
-                metadata={"kind": "api_error"},
-            )]
+            return []
 
         for item in data.get("items", []):
             results.append(Evidence(
@@ -267,6 +274,34 @@ class GitHubConnector(Connector):
                 },
             ))
         return results
+
+    async def _search_issues(self, client: httpx.AsyncClient, search_query: str, headers: dict) -> dict[str, Any]:
+        resp = await client.get(
+            f"{GITHUB_API}/search/issues",
+            headers=headers,
+            params={"q": search_query, "per_page": 5, "sort": "updated"},
+        )
+        resp.raise_for_status()
+        return resp.json()
+
+    def _build_search_query(
+        self,
+        query: str,
+        repo: str | None = None,
+        use_default: bool = True,
+        use_inline_repo: bool = True,
+    ) -> str:
+        target = repo or (self._default_repo() if use_default else None)
+        inline_repo = REPO_QUALIFIER.search(query or "")
+        if use_inline_repo and not target and inline_repo:
+            target = inline_repo.group(0).split(":", 1)[1]
+        terms = REPO_QUALIFIER.sub(" ", query or "")
+        terms = UNSUPPORTED_ISSUE_QUALIFIERS.sub(" ", terms)
+        terms = re.sub(r"\s+", " ", terms).strip() or "incident"
+        parts = [terms, "in:title,body"]
+        if target:
+            parts.append(f"repo:{target}")
+        return " ".join(parts)
 
     async def read(self, ref: str) -> dict[str, Any]:
         """Read a GitHub resource. ref formats:

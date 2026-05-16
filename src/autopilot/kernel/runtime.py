@@ -17,6 +17,7 @@ import asyncio
 import hashlib
 import json
 import logging
+import os
 import secrets
 from contextlib import asynccontextmanager
 from typing import Any, AsyncIterator
@@ -196,7 +197,24 @@ class RuntimeKernel:
     async def run_mission(self, mission_id: str) -> None:
         lock = self._mission_locks.setdefault(mission_id, asyncio.Lock())
         async with lock:
-            await self._run_mission_locked(mission_id)
+            timeout = max(30, int(os.getenv("AUTOPILOT_MISSION_TIMEOUT_SECONDS", "300")))
+            try:
+                await asyncio.wait_for(self._run_mission_locked(mission_id), timeout=timeout)
+            except asyncio.TimeoutError:
+                mission = self.store.get_mission(mission_id)
+                if mission and mission.status not in {MissionStatus.COMPLETE, MissionStatus.CANCELED}:
+                    mission.status = MissionStatus.FAILED
+                    mission.summary = f"Mission timed out after {timeout}s; partial work was preserved."
+                    mission.completed_at = utc_now()
+                    mission.graph.append(MissionGraphNode(
+                        kind=GraphNodeKind.VALIDATION,
+                        title="Mission timed out",
+                        status=StepStatus.FAILED,
+                        summary=mission.summary,
+                        completed_at=utc_now(),
+                    ))
+                    self.store.update_mission(mission)
+                self.tracer.emit(mission_id, "mission.timeout", "failed", {"timeout_seconds": timeout})
 
     async def _run_mission_locked(self, mission_id: str) -> None:
         mission = self.store.get_mission(mission_id)

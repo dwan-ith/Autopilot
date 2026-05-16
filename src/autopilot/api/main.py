@@ -907,7 +907,7 @@ async def events(request: Request) -> StreamingResponse:
         last_payload = ""
         while True:
             totals = {"missions": store.count_missions(), "traces": store.count_traces(), "approvals": len(store.list_action_approvals())}
-            payload = json.dumps({"missions": store.list_missions(), "traces": store.list_traces(limit=20), "totals": totals}, default=str)
+            payload = json.dumps({"missions": store.list_missions(limit=10000), "traces": store.list_traces(limit=5000), "totals": totals}, default=str)
             if payload != last_payload:
                 yield f"data: {payload}\n\n"
                 last_payload = payload

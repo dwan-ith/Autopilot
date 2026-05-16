@@ -177,12 +177,6 @@ export default function Dashboard() {
           <span className="font-bold tracking-tight text-[14px]">AUTOPILOT</span>
         </div>
 
-        <div className="px-3 pt-3">
-          <ConnectionCard connection={connection} />
-        </div>
-        <div className="px-3 pt-2">
-          <SystemProofCard providerHealth={providerHealth} tracingStatus={tracingStatus} />
-        </div>
 
         <nav className="flex-1 space-y-1 p-3">
           <NavItem
@@ -535,7 +529,13 @@ function SignalModal({ isOpen, onClose, onSubmit }: { isOpen: boolean; onClose: 
   const [entities, setEntities] = useState("");
   const [urgency, setUrgency] = useState("high");
 
-  const presets: any[] = [];
+  const presets: Array<{
+    label: string;
+    type: string;
+    summary: string;
+    entities: string;
+    urgency: string;
+  }> = [];
 
   const applyPreset = (p: typeof presets[0]) => {
     setType(p.type);
@@ -667,93 +667,7 @@ function SignalModal({ isOpen, onClose, onSubmit }: { isOpen: boolean; onClose: 
   );
 }
 
-function ConnectionCard({ connection }: { connection: BackendConnection }) {
-  const isConnected = connection.status === "connected";
-  const isOffline = connection.status === "offline";
-  const isChecking = connection.status === "checking";
 
-  return (
-    <div
-      className={cn(
-        "rounded-lg border p-2.5",
-        isConnected
-          ? "border-emerald-500/20 bg-emerald-500/5"
-          : isOffline
-            ? "border-red-500/25 bg-red-500/5"
-            : "border-amber-500/25 bg-amber-500/5",
-      )}
-    >
-      <div
-        className={cn(
-          "mb-1 flex items-center gap-2",
-          isConnected ? "text-emerald-500" : isOffline ? "text-red-500" : "text-amber-500",
-        )}
-      >
-        <span className={cn("h-1.5 w-1.5 rounded-full", isChecking && "animate-pulse", isConnected ? "bg-emerald-500" : isOffline ? "bg-red-500" : "bg-amber-500")} />
-        <span className="text-[11px] font-black uppercase tracking-wider">
-          Backend {connection.status}
-        </span>
-      </div>
-      <p className="text-[10px] font-medium leading-relaxed text-muted-foreground/80">{connection.message}</p>
-      <div className="mt-2 space-y-1 border-t border-current/10 pt-2 text-[9px] font-bold uppercase tracking-wider text-muted-foreground/50">
-        <div className="flex justify-between gap-2">
-          <span>API</span>
-          <span className="truncate normal-case">{connection.apiBase}</span>
-        </div>
-        <div className="flex justify-between gap-2">
-          <span>Events</span>
-          <span>{connection.sseConnected ? "streaming" : "disconnected"}</span>
-        </div>
-      </div>
-    </div>
-  );
-}
-
-function SystemProofCard({
-  providerHealth,
-  tracingStatus,
-}: {
-  providerHealth: ProviderHealth | null;
-  tracingStatus: TracingStatus | null;
-}) {
-  const activeSlots = providerHealth?.active_slots ?? 0;
-  const quarantinedSlots = providerHealth?.quarantined_slots ?? 0;
-  const providerOk = Boolean(providerHealth && (providerHealth.disabled || activeSlots > 0));
-  const traceMode = tracingStatus?.proof_mode || "unknown";
-  const traceOk = Boolean(tracingStatus?.local_sqlite);
-
-  return (
-    <div className="rounded-lg border border-border/40 bg-white/[0.015] p-2.5">
-      <div className="mb-2 flex items-center justify-between">
-        <span className="text-[10px] font-black uppercase tracking-wider text-muted-foreground/60">Proof</span>
-        <span
-          className={cn(
-            "h-1.5 w-1.5 rounded-full",
-            providerOk && traceOk ? "bg-emerald-500" : "bg-amber-500",
-          )}
-        />
-      </div>
-      <div className="space-y-1.5 text-[10px] font-bold">
-        <div className="flex items-center justify-between gap-2">
-          <span className="text-muted-foreground/60">LLM slots</span>
-          <span className={providerOk ? "text-emerald-500" : "text-amber-500"}>
-            {providerHealth ? `${activeSlots}/${providerHealth.configured_slots} active` : "unknown"}
-          </span>
-        </div>
-        <div className="flex items-center justify-between gap-2">
-          <span className="text-muted-foreground/60">Quarantine</span>
-          <span className={quarantinedSlots ? "text-amber-500" : "text-muted-foreground/70"}>
-            {providerHealth ? quarantinedSlots : "-"}
-          </span>
-        </div>
-        <div className="flex items-center justify-between gap-2">
-          <span className="text-muted-foreground/60">Tracing</span>
-          <span className={traceOk ? "text-emerald-500" : "text-amber-500"}>{traceMode}</span>
-        </div>
-      </div>
-    </div>
-  );
-}
 
 function NavItem({ icon: Icon, label, active, onClick, count }: { icon: ElementType; label: string; active: boolean; onClick: () => void; count?: number }) {
   return (

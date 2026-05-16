@@ -28,6 +28,17 @@ class WebhookConnector(Connector):
         reliability_score=0.98,
     )
 
+    def readiness(self, action: str | None = None) -> dict:
+        return {
+            "configured": True,
+            "action_ready": True,
+            "missing": [],
+            "mode": "ingress",
+            "detail": "Inbound webhook normalization is active.",
+            "action": action,
+            "integration_live": False,
+        }
+
 
 class SentryConnector(Connector):
     manifest = ConnectorManifest(
@@ -77,6 +88,7 @@ class SentryConnector(Connector):
             "mode": "api+webhook" if api_ready else "webhook_only",
             "detail": "Sentry API + webhook active." if api_ready else "Webhook ingestion active. Set SENTRY_TOKEN + SENTRY_ORG to enable issue search.",
             "action": action,
+            "integration_live": api_ready,
         }
 
     async def normalize_event(self, payload: dict[str, Any]) -> Signal:

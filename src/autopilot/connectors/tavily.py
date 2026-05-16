@@ -63,6 +63,7 @@ class TavilyConnector(Connector):
             "mode": "tavily_ai" if key else "duckduckgo+hackernews",
             "detail": "Tavily AI search ready." if key else "Free fallback active: DuckDuckGo + Hacker News. Set TAVILY_API_KEY to upgrade.",
             "action": action,
+            "integration_live": bool(key),
         }
 
     async def search(self, query: str) -> list[Evidence]:

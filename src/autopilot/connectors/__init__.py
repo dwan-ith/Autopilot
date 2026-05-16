@@ -6,7 +6,6 @@ from autopilot.connectors.google_drive import GoogleDriveConnector
 from autopilot.connectors.knowledge import KnowledgeConnector
 from autopilot.connectors.linear import LinearConnector  # canonical full GraphQL implementation
 from autopilot.connectors.notion import NotionConnector
-from autopilot.connectors.pagerduty import PagerDutyConnector
 from autopilot.connectors.security import SecurityAuditConnector
 from autopilot.connectors.tavily import TavilyConnector
 from autopilot.connectors.weather import WeatherConnector
@@ -17,7 +16,6 @@ def default_registry() -> ConnectorRegistry:
     registry = ConnectorRegistry()
     registry.register(WebhookConnector())
     registry.register(SentryConnector())
-    registry.register(PagerDutyConnector())
     registry.register(GitHubConnector())
     registry.register(KnowledgeConnector())
     registry.register(ArtifactConnector())

@@ -17,6 +17,7 @@ import asyncio
 import hashlib
 import json
 import logging
+import secrets
 from contextlib import asynccontextmanager
 from typing import Any, AsyncIterator
 
@@ -88,6 +89,9 @@ class RuntimeKernel:
             mission = self.store.get_mission(corr_id)
             if mission:
                 mission.signals.append(signal)
+                pl = signal.payload.get("pipeline")
+                if isinstance(pl, dict):
+                    mission.pipeline.update(pl)
                 mission.graph.append(MissionGraphNode(
                     kind=GraphNodeKind.SIGNAL,
                     title=f"Correlated signal: {signal.type}",
@@ -97,7 +101,8 @@ class RuntimeKernel:
                     completed_at=utc_now(),
                     metadata={"source": signal.source, "entities": signal.entities},
                 ))
-                mission.status = MissionStatus.RUNNING
+                if mission.status != MissionStatus.WAITING:
+                    mission.status = MissionStatus.RUNNING
                 mission.summary = f"Correlated new {signal.type} signal into existing mission."
                 self.store.update_mission(mission)
                 self.store.save_signal(signal, mission.id)
@@ -106,12 +111,15 @@ class RuntimeKernel:
                 return mission
 
         # New mission
+        pl_seed = signal.payload.get("pipeline")
+        pipe: dict[str, Any] = dict(pl_seed) if isinstance(pl_seed, dict) else {}
         mission = Mission(
             title=self._title_for(signal),
             status=MissionStatus.QUEUED,
             severity=corr_info.get("severity", signal.urgency) if isinstance(corr_info, dict) else signal.urgency,
             summary=corr_info.get("impact_summary", signal.summary) if isinstance(corr_info, dict) else signal.summary,
             signals=[signal],
+            pipeline=pipe,
             graph=[MissionGraphNode(
                 kind=GraphNodeKind.SIGNAL,
                 title=f"Initial signal: {signal.type}",
@@ -145,6 +153,23 @@ class RuntimeKernel:
         for mission in self.store.active_missions():
             self.schedule(mission.id)
 
+    def resume_pipeline_delivery(self, mission_id: str, continuation_secret: str) -> bool:
+        """Continue a mission paused after analysis (defer_delivery). Returns False on auth/state mismatch."""
+        mission = self.store.get_mission(mission_id)
+        if not mission or mission.status != MissionStatus.WAITING:
+            return False
+        if not mission.pipeline.get("defer_delivery"):
+            return False
+        if not mission.pipeline.get("delivery_pending"):
+            return False
+        if mission.pipeline.get("continuation_secret") != continuation_secret:
+            return False
+        mission.status = MissionStatus.RUNNING
+        self.store.update_mission(mission)
+        self.tracer.emit(mission_id, "pipeline.resume", "started", {"mission_id": mission_id})
+        self.schedule(mission_id)
+        return True
+
     def cancel(self, mission_id: str, reason: str = "Canceled by operator request") -> bool:
         mission = self.store.get_mission(mission_id)
         if not mission:
@@ -177,6 +202,28 @@ class RuntimeKernel:
         mission = self.store.get_mission(mission_id)
         if not mission or mission.status == MissionStatus.CANCELED:
             return
+
+        # Delivery-only continuation (async / webhook-gated pipeline)
+        if (
+            mission.pipeline.get("defer_delivery")
+            and mission.pipeline.get("analysis_complete")
+            and mission.pipeline.get("delivery_pending")
+        ):
+            if mission.status == MissionStatus.WAITING:
+                return
+            if mission.status == MissionStatus.RUNNING:
+                try:
+                    await self._complete_delivery_phases(mission_id)
+                except asyncio.CancelledError:
+                    self.tracer.emit(mission_id, "mission.canceled", "canceled", {"reason": "Runtime task canceled"})
+                except Exception as exc:
+                    log.exception("Mission %s delivery failed: %s", mission_id, exc)
+                    m2 = self.store.get_mission(mission_id) or mission
+                    m2.status = MissionStatus.FAILED
+                    m2.summary = f"Delivery failed: {exc}"
+                    self.store.update_mission(m2)
+                    self.tracer.emit(mission_id, "mission.failed", "failed", {"error": str(exc), "phase": "delivery"})
+                return
 
         try:
             mission.status = MissionStatus.RUNNING
@@ -259,46 +306,32 @@ class RuntimeKernel:
                     step.metadata = {"confidence": mission.confidence, "evidence_count": len(mission.evidence)}
                     self.store.update_mission(mission)
 
-            # ── STEP 6: Executor ──────────────────────────────────────────
-            async with self.step(mission, "Executor", "synthesize brief and execute approved actions") as step:
-                brief = await self.operators.synthesize(mission)
-                step.metadata = {"brief_preview": brief[:400]}
+            # ── STEP 6: Reflection (cross-branch synthesis) ───────────────
+            async with self.step(mission, "Reflection", "synthesize evidence, gaps, readiness for delivery") as step:
+                mission = await self.operators.reflect_mission(mission)
+                ref = mission.pipeline.get("reflection") or {}
+                step.output_summary = str(ref.get("reflection", ""))[:500]
+                step.metadata = {"reflection": ref}
+                self.store.update_mission(mission)
 
-            # ── STEP 7: Action Publisher (Governor-gated) ─────────────────
-            validation: dict = {}  # safe default if publish_actions raises
-            async with self.step(mission, "Action Publisher", "governor-gated side effects and notifications") as step:
-                actions, validation = await self.operators.publish_actions(mission, brief)
-                mission.actions.extend(actions)
-
-                pending = sum(1 for a in mission.approvals if a.status.value == "pending")
-                step.output_summary = (
-                    f"Executed {len(actions)} action(s); pending_approvals={pending}; "
-                    f"resolution={validation.get('resolution_status', 'unknown')}."
+            mission = self.store.get_mission(mission_id) or mission
+            if mission.pipeline.get("defer_delivery"):
+                mission.pipeline.setdefault("continuation_secret", secrets.token_urlsafe(18))
+                mission.pipeline["analysis_complete"] = True
+                mission.pipeline["delivery_pending"] = True
+                mission.pipeline["checkpoint"] = "await_operator_continue"
+                mission.status = MissionStatus.WAITING
+                mission.summary = f"{mission.summary} | Paused — POST /pipeline/continue to finalize delivery."
+                self.store.update_mission(mission)
+                self.tracer.emit(
+                    mission.id,
+                    "pipeline.awaiting_continue",
+                    "waiting",
+                    {"checkpoint": mission.pipeline["checkpoint"], "mission_id": mission.id},
                 )
-                step.metadata = {
-                    "actions": [a.model_dump() for a in actions],
-                    "approvals": [ap.model_dump() for ap in mission.approvals],
-                    "policy_decisions": [d.model_dump() for d in mission.policy_decisions],
-                    "validation": validation,
-                }
-                self._append_action_nodes(mission)
+                return
 
-            # ── STEP 8: Validator ──────────────────────────────────────────
-            # (Validator runs inside publish_actions above; its result is in step.metadata["validation"])
-
-            # ── FINALIZE ──────────────────────────────────────────────────
-            mission.status = MissionStatus.COMPLETE
-            mission.completed_at = utc_now()
-            self.store.update_mission(mission)
-
-            # Memory: remember this mission's outcome
-            resolution = validation.get("resolution_status", "unknown") if validation else "unknown"
-            self.memory.remember(mission, resolution)
-
-            self.tracer.emit(
-                mission.id, "mission.complete", "complete",
-                {"confidence": mission.confidence, "actions": len(mission.actions), "resolution": resolution},
-            )
+            await self._complete_delivery_phases(mission_id)
 
         except asyncio.CancelledError:
             self.tracer.emit(mission_id, "mission.canceled", "canceled", {"reason": "Runtime task canceled"})
@@ -310,6 +343,50 @@ class RuntimeKernel:
             mission.summary = f"Runtime failed: {exc}"
             self.store.update_mission(mission)
             self.tracer.emit(mission_id, "mission.failed", "failed", {"error": str(exc)})
+
+    async def _complete_delivery_phases(self, mission_id: str) -> None:
+        """Executor, policy-gated actions, validation, mission completion."""
+        mission = self.store.get_mission(mission_id)
+        if not mission:
+            return
+        validation: dict = {}
+        async with self.step(mission, "Executor", "synthesize brief and execute approved actions") as step:
+            brief = await self.operators.synthesize(mission)
+            step.metadata = {"brief_preview": brief[:400]}
+
+        mission = self.store.get_mission(mission_id) or mission
+        async with self.step(mission, "Action Publisher", "governor-gated side effects and notifications") as step:
+            actions, validation = await self.operators.publish_actions(mission, brief)
+            mission.actions.extend(actions)
+
+            pending = sum(1 for a in mission.approvals if a.status.value == "pending")
+            step.output_summary = (
+                f"Executed {len(actions)} action(s); pending_approvals={pending}; "
+                f"resolution={validation.get('resolution_status', 'unknown')}."
+            )
+            step.metadata = {
+                "actions": [a.model_dump() for a in actions],
+                "approvals": [ap.model_dump() for ap in mission.approvals],
+                "policy_decisions": [d.model_dump() for d in mission.policy_decisions],
+                "validation": validation,
+            }
+            self._append_action_nodes(mission)
+
+        mission = self.store.get_mission(mission_id) or mission
+        mission.status = MissionStatus.COMPLETE
+        mission.completed_at = utc_now()
+        mission.pipeline.pop("delivery_pending", None)
+        mission.pipeline.pop("checkpoint", None)
+        mission.pipeline.pop("continuation_secret", None)
+        self.store.update_mission(mission)
+
+        resolution = validation.get("resolution_status", "unknown") if validation else "unknown"
+        self.memory.remember(mission, resolution)
+
+        self.tracer.emit(
+            mission.id, "mission.complete", "complete",
+            {"confidence": mission.confidence, "actions": len(mission.actions), "resolution": resolution},
+        )
 
     # ── Step context manager ─────────────────────────────────────────────────
 

@@ -44,6 +44,13 @@ const API_BASE = process.env.NEXT_PUBLIC_API_URL || "";
 const API_KEY = process.env.NEXT_PUBLIC_AUTOPILOT_API_KEY || "";
 const READ_CONFIG = API_KEY ? { headers: { "x-autopilot-key": API_KEY } } : undefined;
 
+/** Catalog ids vs manifest names returned by GET /api/connectors */
+const CATALOG_RUNTIME_ALIASES: Record<string, string> = {
+  web_search: "knowledge",
+  local_artifacts: "artifact",
+  slack: "notification",
+};
+
 type View = "dashboard" | "connectors" | "approvals" | "traces" | "analytics";
 
 function BackgroundGrid() {
@@ -92,6 +99,7 @@ export default function Dashboard() {
     disconnectConnector,
     approveAction,
     rejectAction,
+    refresh,
   } = useAutopilot();
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [currentView, setCurrentView] = useState<View>("dashboard");
@@ -102,10 +110,44 @@ export default function Dashboard() {
     () => missions.find((m) => m.id === selectedId) || missions[0],
     [missions, selectedId],
   );
-  const readinessByName = useMemo(() => {
-    const entries = connectors.map((connector) => [connector.name.toLowerCase(), connector] as const);
-    return new Map(entries);
+  const runtimeConnectorByKey = useMemo(() => {
+    const m = new Map<string, Connector>();
+    for (const c of connectors) {
+      m.set(c.name.toLowerCase(), c);
+    }
+    for (const [catalogId, runtimeName] of Object.entries(CATALOG_RUNTIME_ALIASES)) {
+      const rc = m.get(runtimeName.toLowerCase());
+      if (rc) {
+        m.set(catalogId.toLowerCase(), rc);
+      }
+    }
+    return m;
   }, [connectors]);
+
+  useEffect(() => {
+    if (typeof window === "undefined") return;
+    const params = new URLSearchParams(window.location.search);
+    const oauthOk = params.get("oauth_success");
+    const oauthErr = params.get("oauth_error") ?? params.get("error");
+    if (!oauthOk && !oauthErr) return;
+    void refresh().finally(() => {
+      window.history.replaceState({}, "", `${window.location.pathname}${window.location.hash}`);
+    });
+  }, [refresh]);
+
+  useEffect(() => {
+    if (currentView !== "connectors") return;
+    void refresh();
+  }, [currentView, refresh]);
+
+  useEffect(() => {
+    if (currentView !== "connectors") return;
+    const onVis = () => {
+      if (document.visibilityState === "visible") void refresh();
+    };
+    document.addEventListener("visibilitychange", onVis);
+    return () => document.removeEventListener("visibilitychange", onVis);
+  }, [currentView, refresh]);
 
   const runningCount = missions.filter((m) => m.status === "running").length;
   const backendOffline = connection.status === "offline";
@@ -303,7 +345,10 @@ export default function Dashboard() {
                     <ConnectorCard
                       key={c.id}
                       connector={c}
-                      runtimeConnector={readinessByName.get(c.name.toLowerCase()) ?? readinessByName.get(c.id)}
+                      runtimeConnector={
+                        runtimeConnectorByKey.get(c.id.toLowerCase()) ??
+                        runtimeConnectorByKey.get(c.name.toLowerCase())
+                      }
                       onConnect={connectConnector}
                       onDisconnect={disconnectConnector}
                     />
@@ -935,6 +980,49 @@ function AgentCard({ run }: { run: AgentRun }) {
   );
 }
 
+/** Normalize catalog auth_mode from JSON (string or rare enum-shaped object). */
+function catalogAuthMode(c: ConnectorDirectoryItem): string {
+  const raw = c.auth_mode as unknown;
+  if (typeof raw === "string") return raw;
+  if (raw && typeof raw === "object" && "value" in raw) {
+    const v = (raw as { value: unknown }).value;
+    if (typeof v === "string") return v;
+  }
+  return "";
+}
+
+const READINESS_NON_LIVE_MODES = new Set([
+  "anonymous_public",
+  "local_fallback",
+  "webhook_only",
+  "duckduckgo+hackernews",
+  "open_meteo_fallback",
+  "local_only",
+  "missing_credentials",
+  "missing_callback",
+  "catalog_only",
+]);
+
+/**
+ * Prefer readiness.integration_live when present (current backends).
+ * Older stacks omit it — infer from configured + mode so CONNECTED matches reality.
+ */
+function integrationLiveFromReadiness(
+  readiness?:
+    | (Record<string, unknown> & {
+        configured?: boolean;
+        mode?: string;
+        integration_live?: boolean;
+      })
+    | undefined,
+): boolean {
+  if (!readiness) return false;
+  if (readiness.integration_live === true) return true;
+  if (readiness.integration_live === false) return false;
+  const mode = typeof readiness.mode === "string" ? readiness.mode : "";
+  return Boolean(readiness.configured && mode && !READINESS_NON_LIVE_MODES.has(mode));
+}
+
 function ConnectorCard({
   connector,
   runtimeConnector,
@@ -948,19 +1036,49 @@ function ConnectorCard({
 }) {
   const [busy, setBusy] = useState(false);
   const connected = connector.status === "connected";
-  const canDemoConnect = connector.demo_available || connector.auth_mode === "none";
+  const authMode = catalogAuthMode(connector);
+  const canDemoConnect = connector.demo_available || authMode === "none";
   const readiness = runtimeConnector?.readiness as
-    | (Record<string, unknown> & { configured?: boolean; detail?: string; mode?: string; missing?: string[]; auth_url?: string })
+    | (Record<string, unknown> & {
+        configured?: boolean;
+        detail?: string;
+        mode?: string;
+        missing?: string[];
+        auth_url?: string;
+        integration_live?: boolean;
+      })
     | undefined;
   const oauthUrl = readiness?.auth_url as string | undefined;
-  const isOAuthConnector = connector.auth_mode === "oauth" || !!oauthUrl;
+  const oauthGateActive = Boolean(oauthUrl);
+  const isOAuthConnector = authMode === "oauth" || oauthGateActive;
   const toolCount = runtimeConnector?.tool_count || connector.tools?.length || 0;
+
+  const runtimeIntegration = integrationLiveFromReadiness(readiness);
+  const oauthLive =
+    Boolean(connector.oauth_token_present) ||
+    Boolean(
+      connector.live_connected && (authMode === "oauth" || authMode === "api_key"),
+    );
+
+  const trulyConnected = runtimeIntegration || oauthLive;
+
+  const showDemoBadge =
+    Boolean(connector.is_demo_connection) && !runtimeIntegration && !oauthLive;
+
+  const showConnectedBadge = trulyConnected && !showDemoBadge;
+
+  const oauthAuthorized =
+    Boolean(connector.oauth_token_present) ||
+    runtimeIntegration ||
+    (!connector.is_demo_connection &&
+      connected &&
+      connector.connection_auth_mode === "oauth");
 
   const handleToggle = async () => {
     if (busy) return;
     setBusy(true);
     try {
-      if (connected) {
+      if (connected || trulyConnected) {
         await onDisconnect(connector.id);
       } else if (canDemoConnect) {
         await onConnect(connector.id);
@@ -978,25 +1096,30 @@ function ConnectorCard({
       {/* Background Glow */}
       <div className={cn(
         "absolute -right-4 -top-4 h-24 w-24 rounded-full blur-[40px] opacity-0 group-hover:opacity-100 transition-opacity duration-700",
-        connected ? "bg-emerald-500/10" : "bg-primary/10"
+        showConnectedBadge ? "bg-emerald-500/10" : showDemoBadge ? "bg-amber-500/10" : "bg-primary/10"
       )} />
 
       <div className="mb-6 flex items-start justify-between relative">
         <div className="flex h-12 w-12 items-center justify-center rounded-2xl bg-white/[0.03] border border-white/5 group-hover:scale-110 transition-all duration-500 group-hover:border-primary/20 shadow-inner">
           <Database className={cn(
             "h-6 w-6 transition-colors duration-500",
-            connected ? "text-emerald-500" : "text-muted-foreground group-hover:text-primary"
+            showConnectedBadge ? "text-emerald-500" : showDemoBadge ? "text-amber-500" : "text-muted-foreground group-hover:text-primary"
           )} />
-          {connected && (
-            <div className="absolute inset-0 rounded-2xl border-2 border-emerald-500/20 animate-pulse" />
+          {(showConnectedBadge || showDemoBadge) && (
+            <div className={cn(
+              "absolute inset-0 rounded-2xl border-2 animate-pulse",
+              showConnectedBadge ? "border-emerald-500/20" : "border-amber-500/20"
+            )} />
           )}
         </div>
         
         <div className="flex flex-col items-end gap-2">
           <div className={cn(
             "flex items-center gap-1.5 rounded-full px-3 py-1 text-[10px] font-black uppercase tracking-tighter ring-1 ring-inset shadow-sm",
-            connected || readiness?.configured
+            showConnectedBadge
               ? "bg-emerald-500/10 text-emerald-500 ring-emerald-500/20"
+              : showDemoBadge
+                ? "bg-amber-500/10 text-amber-500 ring-amber-500/20"
               : readiness
                 ? "bg-amber-500/10 text-amber-500 ring-amber-500/20"
                 : connector.implemented
@@ -1004,13 +1127,15 @@ function ConnectorCard({
                   : "bg-white/5 text-muted-foreground ring-white/10"
           )}>
             <div className={cn("h-1.5 w-1.5 rounded-full",
-              connected ? "bg-emerald-500 animate-pulse"
-              : readiness?.configured ? "bg-emerald-500"
+              showConnectedBadge ? "bg-emerald-500 animate-pulse"
+              : showDemoBadge ? "bg-amber-500 animate-pulse"
               : readiness ? "bg-amber-500"
               : "bg-current opacity-40"
             )} />
-            {connected || readiness?.configured
+            {showConnectedBadge
               ? "CONNECTED"
+              : showDemoBadge
+                ? "DEMO"
               : readiness
                 ? "CONFIG REQUIRED"
                 : connector.implemented ? "ADAPTER" : "CATALOG"}
@@ -1059,42 +1184,66 @@ function ConnectorCard({
         </div>
 
         {/* Real OAuth button — redirects to Google consent screen */}
-        {oauthUrl && !readiness?.configured ? (
+        {oauthGateActive && !oauthAuthorized ? (
           <a
             href={oauthUrl}
-            className="flex w-full items-center justify-between rounded-lg border border-blue-500/30 bg-blue-600/10 px-4 py-2.5 text-[12px] font-bold text-blue-400 transition-all hover:bg-blue-600/20 hover:text-blue-300 hover:border-blue-400/50"
+            className={cn(
+              "flex w-full items-center justify-between rounded-lg border px-4 py-2.5 text-[12px] font-bold transition-all",
+              connector.id === "github" 
+                ? "border-slate-500/30 bg-slate-600/10 text-slate-300 hover:bg-slate-600/20 hover:border-slate-400/50"
+                : "border-blue-500/30 bg-blue-600/10 text-blue-400 hover:bg-blue-600/20 hover:border-blue-400/50"
+            )}
           >
             <span className="flex items-center gap-2">
-              <svg className="h-3.5 w-3.5" viewBox="0 0 24 24" fill="currentColor">
-                <path d="M22.56 12.25c0-.78-.07-1.53-.2-2.25H12v4.26h5.92c-.26 1.37-1.04 2.53-2.21 3.31v2.77h3.57c2.08-1.92 3.28-4.74 3.28-8.09z" fill="#4285F4"/>
-                <path d="M12 23c2.97 0 5.46-.98 7.28-2.66l-3.57-2.77c-.98.66-2.23 1.06-3.71 1.06-2.86 0-5.29-1.93-6.16-4.53H2.18v2.84C3.99 20.53 7.7 23 12 23z" fill="#34A853"/>
-                <path d="M5.84 14.09c-.22-.66-.35-1.36-.35-2.09s.13-1.43.35-2.09V7.07H2.18C1.43 8.55 1 10.22 1 12s.43 3.45 1.18 4.93l2.85-2.22.81-.62z" fill="#FBBC05"/>
-                <path d="M12 5.38c1.62 0 3.06.56 4.21 1.64l3.15-3.15C17.45 2.09 14.97 1 12 1 7.7 1 3.99 3.47 2.18 7.07l3.66 2.84c.87-2.6 3.3-4.53 6.16-4.53z" fill="#EA4335"/>
-              </svg>
-              Connect with Google
+              <Lock className="h-3.5 w-3.5" />
+              Connect {connector.name}
             </span>
             <ArrowRight className="h-3.5 w-3.5 opacity-70" />
           </a>
-        ) : readiness?.configured ? (
-          <div className="flex w-full items-center justify-between rounded-lg border border-emerald-500/20 bg-emerald-500/5 px-4 py-2.5 text-[12px] font-bold text-emerald-400">
-            <span className="flex items-center gap-2">
-              <CheckCircle2 className="h-3.5 w-3.5" />
-              Authorized
-            </span>
-            <span className="text-[10px] opacity-60 uppercase tracking-wider">{readiness.mode as string}</span>
+        ) : oauthGateActive && oauthAuthorized ? (
+          <div className="space-y-2">
+            <div className="flex w-full items-center justify-between rounded-lg border border-emerald-500/20 bg-emerald-500/5 px-4 py-2.5 text-[12px] font-bold text-emerald-400">
+              <span className="flex items-center gap-2">
+                <CheckCircle2 className="h-3.5 w-3.5" />
+                Authorized
+              </span>
+              <span className="text-[10px] opacity-60 uppercase tracking-wider">
+                {(readiness?.mode as string | undefined) ||
+                  connector.connection_auth_mode ||
+                  "oauth"}
+              </span>
+            </div>
+            {connected ? (
+              <button
+                type="button"
+                onClick={async () => {
+                  if (busy) return;
+                  setBusy(true);
+                  try {
+                    await onDisconnect(connector.id);
+                  } finally {
+                    setBusy(false);
+                  }
+                }}
+                disabled={busy}
+                className="flex w-full items-center justify-center rounded-lg border border-white/10 bg-white/[0.02] px-4 py-2 text-[11px] font-bold text-muted-foreground transition-colors hover:bg-white/[0.05] hover:text-foreground"
+              >
+                Disconnect account
+              </button>
+            ) : null}
           </div>
         ) : (
           <button
             onClick={handleToggle}
-            disabled={busy || (!connected && !canDemoConnect && !isOAuthConnector)}
+            disabled={busy || (!(connected || trulyConnected) && !canDemoConnect && !isOAuthConnector)}
             className="flex w-full items-center justify-between rounded-lg bg-secondary/50 px-4 py-2.5 text-[12px] font-bold transition-all hover:bg-secondary disabled:cursor-not-allowed disabled:opacity-50"
           >
             {busy
               ? "Updating..."
-              : connected
-                ? "Disconnect Demo"
+              : (connected || trulyConnected)
+                ? "Disconnect"
                 : canDemoConnect
-                  ? "Connect Demo"
+                  ? "Connect"
                   : "API Key Required"}
             <ArrowRight className="h-3.5 w-3.5 opacity-40 group-hover:translate-x-0.5 transition-transform" />
           </button>
@@ -1413,40 +1562,74 @@ function AnalyticsView() {
       )}
 
       {/* Connector Health */}
-      {connHealth.length > 0 && (
-        <section className="space-y-4">
+      <section className="space-y-4">
+        <div className="flex items-center justify-between">
           <h2 className="text-sm font-bold uppercase tracking-wider text-muted-foreground/60">Connector Health</h2>
-          <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+          <span className="text-[10px] font-bold text-muted-foreground/40 uppercase tracking-wider">{connHealth.length} connected</span>
+        </div>
+        {connHealth.length === 0 ? (
+          <div className="rounded-xl border border-border/40 bg-white/[0.01] p-8 text-center">
+            <Database className="h-8 w-8 mx-auto mb-3 text-muted-foreground/20" />
+            <p className="text-[13px] font-bold text-muted-foreground">No connectors connected yet</p>
+            <p className="text-[11px] text-muted-foreground/50 mt-1">Connect your services in the Connector Hub to see health data here.</p>
+          </div>
+        ) : (
+          <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-3">
             {connHealth.map((c) => {
-              const successRate = c.total > 0 ? c.complete / c.total : 0;
+              const successRate = c.total > 0 ? c.complete / c.total : null;
+              const hasHistory = c.total > 0;
               return (
-                <div key={c.connector} className="rounded-xl border border-border/40 bg-white/[0.01] p-4 space-y-3">
+                <div key={c.connector} className="rounded-xl border border-border/40 bg-white/[0.01] p-4 space-y-3 hover:border-emerald-500/20 transition-all">
                   <div className="flex items-center justify-between">
-                    <span className="font-bold text-[13px]">{c.connector}</span>
-                    <span className="text-[11px] text-muted-foreground tabular-nums">{c.total} actions</span>
+                    <span className="font-bold text-[13px] capitalize">{c.connector.replace(/_/g, " ")}</span>
+                    <div className="flex items-center gap-2">
+                      <span className={cn(
+                        "text-[9px] font-black uppercase tracking-wider px-1.5 py-0.5 rounded border",
+                        "border-emerald-500/20 text-emerald-500 bg-emerald-500/5"
+                      )}>
+                        {c.mode || "connected"}
+                      </span>
+                    </div>
                   </div>
-                  {/* Progress bar */}
-                  <div className="h-2 rounded-full bg-white/5 overflow-hidden">
-                    <div
-                      className={cn(
-                        "h-full rounded-full transition-all duration-500",
-                        successRate >= 0.8 ? "bg-emerald-500" : successRate >= 0.5 ? "bg-amber-500" : "bg-red-500"
-                      )}
-                      style={{ width: `${Math.max(successRate * 100, 2)}%` }}
-                    />
-                  </div>
-                  <div className="flex gap-3 text-[10px] font-bold">
-                    {c.complete > 0 && <span className="text-emerald-400">{c.complete} complete</span>}
-                    {c.skipped > 0 && <span className="text-amber-400">{c.skipped} skipped</span>}
-                    {c.blocked > 0 && <span className="text-orange-400">{c.blocked} blocked</span>}
-                    {c.failed > 0 && <span className="text-red-400">{c.failed} failed</span>}
-                  </div>
+
+                  {/* Progress bar — only shown when there's action history */}
+                  {hasHistory ? (
+                    <>
+                      <div className="space-y-1">
+                        <div className="flex justify-between text-[10px] text-muted-foreground/50">
+                          <span>{c.total} actions</span>
+                          <span>{successRate !== null ? `${Math.round(successRate * 100)}% success` : ""}</span>
+                        </div>
+                        <div className="h-1.5 rounded-full bg-white/5 overflow-hidden">
+                          <div
+                            className={cn(
+                              "h-full rounded-full transition-all duration-700",
+                              successRate === null ? "bg-muted-foreground/20" :
+                              successRate >= 0.8 ? "bg-emerald-500" :
+                              successRate >= 0.5 ? "bg-amber-500" : "bg-red-500"
+                            )}
+                            style={{ width: `${successRate !== null ? Math.max(successRate * 100, 3) : 100}%` }}
+                          />
+                        </div>
+                      </div>
+                      <div className="flex flex-wrap gap-2 text-[10px] font-bold">
+                        {c.complete > 0 && <span className="text-emerald-400">{c.complete} complete</span>}
+                        {c.skipped > 0 && <span className="text-amber-400">{c.skipped} skipped</span>}
+                        {c.blocked > 0 && <span className="text-orange-400">{c.blocked} blocked</span>}
+                        {c.failed > 0 && <span className="text-red-400">{c.failed} failed</span>}
+                      </div>
+                    </>
+                  ) : (
+                    <p className="text-[11px] text-muted-foreground/40 italic">
+                      {c.detail || "Connected — no actions run yet"}
+                    </p>
+                  )}
                 </div>
               );
             })}
           </div>
-        </section>
-      )}
+        )}
+      </section>
 
       {!stats?.total && agents.length === 0 && connHealth.length === 0 && (
         <div className="rounded-lg border border-border/40 bg-white/[0.01] p-12 text-center text-muted-foreground">

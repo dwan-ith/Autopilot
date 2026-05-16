@@ -79,6 +79,7 @@ class LinearConnector(Connector):
             "mode": "api_key" if key else "missing_credentials",
             "detail": "Linear API ready." if key else "Missing: LINEAR_API_KEY",
             "action": action,
+            "integration_live": bool(key),
         }
 
     async def _gql(self, query: str, variables: dict | None = None) -> dict[str, Any]:

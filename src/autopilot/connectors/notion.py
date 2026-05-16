@@ -80,6 +80,7 @@ class NotionConnector(Connector):
             "mode": "api_key",
             "detail": "Notion API ready." if configured else "Missing: NOTION_API_KEY",
             "action": action,
+            "integration_live": configured,
         }
 
     async def search(self, query: str) -> list[Evidence]:

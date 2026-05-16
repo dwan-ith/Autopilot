@@ -128,6 +128,7 @@ class ConnectorCatalogItem(BaseModel):
 
 class ConnectorConnection(BaseModel):
     connector_id: str
+    user_id: str = "default_user"  # Support multi-tenant connections
     status: ConnectorStatus = ConnectorStatus.DISCONNECTED
     auth_mode: AuthMode = AuthMode.DEMO
     granted_scopes: list[str] = Field(default_factory=list)
@@ -276,6 +277,8 @@ class Mission(BaseModel):
     updated_at: datetime = Field(default_factory=utc_now)
     completed_at: datetime | None = None
     memory_notes: list[str] = Field(default_factory=list)
+    """Async pipeline / hackathon orchestration flags (persisted with mission JSON)."""
+    pipeline: dict[str, Any] = Field(default_factory=dict)
 
 
 class WebhookSignalRequest(BaseModel):

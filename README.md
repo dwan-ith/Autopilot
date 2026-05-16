@@ -10,7 +10,21 @@ The platform is built around strict policy gates and human-in-the-loop approvals
 - **Agent Swarm**: Uses a ReAct-based agent loop to gather evidence across connected tools.
 - **Policy Engine**: Enforces rules based on connector capabilities, risk levels, and confidence thresholds.
 - **Human-in-the-Loop**: High-risk actions require explicit approval from the dashboard before execution.
-- **Observability**: SQLite-backed state management records every agent thought, tool call, and state transition.
+- **Observability**: SQLite-backed trace store for every operator step, tool transition, and mission lifecycle event.
+
+### Omium (optional dashboard tracing)
+
+The hosted Omium platform uses the **Python SDK** (`omium.init`, `@omium.trace`) and/or its
+**REST execution API** — not a generic `POST …/traces` JSON dump. To enable the official client:
+
+```bash
+pip install ".[omium]"
+```
+
+Set `OMIUM_SDK_INIT=1`, `OMIUM_API_KEY`, and optionally `OMIUM_PROJECT` / `OMIUM_API_URL`.
+For a **custom HTTP relay** of SQLite-shaped events only, set `OMIUM_HTTP_INGEST_URL`
+(compatible with `X-API-Key` auth) in addition to `OMIUM_API_KEY`.
+
 - **Local Fallback**: Can run in a deterministic, heuristic mode without an LLM provider for testing and validation.
 
 ## Architecture 
@@ -35,7 +49,7 @@ Implemented integrations include:
 - **Linear**: Create issues.
 - **Communication**: Slack (notifications), Gmail (draft/send replies).
 - **Knowledge**: Local runbooks, Google Drive, Notion, Tavily.
-- **Observability**: Sentry, PagerDuty, Weather.
+- **Observability**: Sentry, Weather.
 - **System**: Durable artifacts and generic webhooks.
 
 *Note: Connectors require valid API keys or OAuth credentials to function.*
@@ -81,7 +95,11 @@ Set the following environment variables in `.env` to enable specific features:
 | `AUTOPILOT_DISABLE_LLM=1` | Runs the system in offline, deterministic heuristic mode. |
 | `OPENROUTER_API_KEY` | Primary LLM provider key (recommended). |
 | `GROQ_API_KEY` | Fallback LLM provider key. |
-| `SLACK_WEBHOOK_URL` | Enables Slack notifications for the `notify_ops` action. |
+| `OMIUM_API_KEY` | Omium SDK/API authentication (required when Omium integration is enabled). |
+| `OMIUM_SDK_INIT` | `1` to call `omium.init()` at startup (after `pip install ".[omium]"`). |
+| `OMIUM_PROJECT` | Omium project name (default `autopilot`). |
+| `OMIUM_API_URL` | Override Omium API base URL when needed. |
+| `OMIUM_HTTP_INGEST_URL` | Optional custom URL to POST trace-shaped JSON (advanced relay only). |
 
 Additional connector-specific keys (e.g., `GITHUB_TOKEN`, `NOTION_API_KEY`) are documented in `.env.example`.
 
@@ -97,12 +115,15 @@ npm run lint
 npm run build
 ```
 
-## Hackathon Demo
+## Hackathon demo
 
-See `HACKATHON_CHECKLIST.md` for the required-capability map, demo script, and
-rubric score estimate.
+Use **Backend** + **Frontend** from [Setup](#setup). Highlights:
 
-Useful judge-facing endpoints:
+- `POST /demo/fire` — multi-signal autonomous mission (honours `AUTOPILOT_API_KEY` when set).
+- `GET /api/operators` — judge-facing catalog: tools, readiness, safe actions.
+- `POST /api/operators/{id}/probe` — bounded probes with real side effects where declared.
+
+Additional endpoints:
 
 - `GET /api/operators`: all operators, tool schemas, safe actions, readiness.
 - `POST /api/operators/web_search/probe`: local knowledge/web-search probe.

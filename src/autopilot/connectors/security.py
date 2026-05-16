@@ -20,6 +20,7 @@ class SecurityAuditConnector(Connector):
         return {
             "configured": True, "action_ready": True, "missing": [],
             "mode": "webhook", "detail": "Security audit webhook receiver is active.", "action": action,
+            "integration_live": False,
         }
 
     async def normalize_event(self, payload: dict[str, Any]) -> Signal:

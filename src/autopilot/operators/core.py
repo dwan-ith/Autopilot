@@ -24,6 +24,7 @@ from autopilot.agents.base import Tool
 from autopilot.agents.mission.executor import ExecutorAgent
 from autopilot.agents.mission.investigator import InvestigatorAgent
 from autopilot.agents.mission.planner import PlannerAgent
+from autopilot.agents.mission.reflection import ReflectionAgent
 from autopilot.agents.mission.validator import ValidatorAgent
 from autopilot.agents.persistent.correlator import CorrelatorAgent
 from autopilot.agents.persistent.governor import GovernorAgent
@@ -150,6 +151,11 @@ class OperatorSuite:
 
     async def verify(self, mission: Mission) -> tuple[Mission, bool]:
         return await self.verifier.verify(mission)
+
+    async def reflect_mission(self, mission: Mission) -> Mission:
+        """Cross-branch synthesis after verification (reads tools optional)."""
+        reflector = ReflectionAgent(tools=_knowledge_tools(self.registry))
+        return await reflector.reflect(mission)
 
     # ── Adaptive replanning (Planner subagent) ───────────────────────────────
 

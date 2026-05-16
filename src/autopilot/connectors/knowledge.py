@@ -90,6 +90,7 @@ class KnowledgeConnector(Connector):
             "mode": "local+tavily" if tavily else "local_only",
             "detail": "Local runbooks + Tavily web search active." if tavily else "Local runbooks active. Set TAVILY_API_KEY for web search.",
             "action": action,
+            "integration_live": tavily,
         }
 
     async def search(self, query: str) -> list[Evidence]:

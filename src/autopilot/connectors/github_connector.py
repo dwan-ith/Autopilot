@@ -29,6 +29,9 @@ from autopilot.models import (
     Evidence,
     Signal,
 )
+from autopilot.connectors.oauth import build_github_auth_url, get_valid_token, github_configured, is_authorized
+from autopilot.storage import DB_PATH
+from pathlib import Path
 
 log = logging.getLogger("autopilot.connectors.github")
 
@@ -37,17 +40,6 @@ GITHUB_API = "https://api.github.com"
 
 def _token() -> str | None:
     return os.getenv("GITHUB_TOKEN", "").strip() or None
-
-
-def _headers() -> dict[str, str]:
-    token = _token()
-    h = {
-        "Accept": "application/vnd.github+json",
-        "X-GitHub-Api-Version": "2022-11-28",
-    }
-    if token:
-        h["Authorization"] = f"Bearer {token}"
-    return h
 
 
 class GitHubConnector(Connector):
@@ -104,21 +96,52 @@ class GitHubConnector(Connector):
     def _default_repo(self) -> str | None:
         return os.getenv("GITHUB_REPO", "").strip() or None
 
+    def _db_path(self) -> Path:
+        return DB_PATH
+
+    def _authorized(self) -> bool:
+        return (github_configured() and is_authorized("github", self._db_path())) or bool(_token())
+
+    async def _headers(self) -> dict[str, str]:
+        h = {
+            "Accept": "application/vnd.github+json",
+            "X-GitHub-Api-Version": "2022-11-28",
+        }
+        token = await get_valid_token("github", self._db_path()) if github_configured() else None
+        if not token:
+            token = _token()
+        if token:
+            h["Authorization"] = f"Bearer {token}"
+        return h
+
     def readiness(self, action: str | None = None) -> dict[str, Any]:
-        token = bool(_token())
+        has_pat = bool(_token())
+        is_oauth_configured = github_configured()
+        is_oauth_authorized = is_oauth_configured and is_authorized("github", self._db_path())
+        
+        authorized = is_oauth_authorized or has_pat
         write_action = action in {"create_issue", "post_comment"}
         missing = []
-        if write_action and not token:
-            missing.append("GITHUB_TOKEN (required for write actions)")
+        if write_action and not authorized:
+            missing.append("GitHub Authorization (required for write actions)")
         if write_action and not self._default_repo():
             missing.append("GITHUB_REPO (required for write actions)")
+            
+        mode = "oauth" if is_oauth_configured else ("authenticated" if has_pat else "anonymous_public")
+        
+        detail = "GitHub API ready (authenticated)." if authorized else "Anonymous public GitHub search active."
+        if not is_oauth_configured and not has_pat:
+            detail += " Set GITHUB_CLIENT_ID/SECRET for OAuth, or GITHUB_TOKEN for PAT."
+            
         return {
-            "configured": True,   # anonymous public search always works (60 req/hr)
-            "action_ready": True,
-            "missing": missing if missing else ([] if token else ["GITHUB_TOKEN (optional — enables private repos + write actions)"]),
-            "mode": "authenticated" if token else "anonymous_public",
-            "detail": "GitHub API ready (authenticated)." if token else "Anonymous public GitHub search active. Set GITHUB_TOKEN for private repos and write actions.",
+            "configured": authorized,
+            "action_ready": authorized,
+            "missing": missing if missing else ([] if authorized else ["GitHub OAuth or GITHUB_TOKEN (optional — enables private repos + write actions)"]),
+            "mode": mode,
+            "auth_url": build_github_auth_url(state="github") if is_oauth_configured and not is_oauth_authorized else None,
+            "detail": detail,
             "action": action,
+            "integration_live": authorized,
         }
 
     async def normalize_event(self, payload: dict[str, Any]) -> Signal:
@@ -213,7 +236,7 @@ class GitHubConnector(Connector):
             async with httpx.AsyncClient(timeout=15) as client:
                 resp = await client.get(
                     f"{GITHUB_API}/search/issues",
-                    headers=_headers(),
+                    headers=await self._headers(),
                     params={"q": search_query, "per_page": 5, "sort": "updated"},
                 )
                 resp.raise_for_status()
@@ -262,7 +285,7 @@ class GitHubConnector(Connector):
 
         try:
             async with httpx.AsyncClient(timeout=15) as client:
-                resp = await client.get(url, headers=_headers())
+                resp = await client.get(url, headers=await self._headers())
                 resp.raise_for_status()
                 return resp.json()
         except Exception as exc:
@@ -284,14 +307,13 @@ class GitHubConnector(Connector):
         return await self.action("create_issue", {"repo": repo, "title": name, "body": content})
 
     async def action(self, name: str, payload: dict) -> ActionResult:
-        token = _token()
-        if not token:
+        if not self._authorized():
             return ActionResult(
                 connector=self.manifest.name,
                 action=name,
                 status="skipped",
-                summary="GITHUB_TOKEN not configured; skipping GitHub action.",
-                metadata={"required_env": "GITHUB_TOKEN"},
+                summary="GitHub not authorized; skipping GitHub action.",
+                metadata={"required_env": "GITHUB_CLIENT_ID or GITHUB_TOKEN"},
             )
 
         if name == "create_issue":
@@ -329,7 +351,7 @@ class GitHubConnector(Connector):
             async with httpx.AsyncClient(timeout=15) as client:
                 resp = await client.post(
                     f"{GITHUB_API}/repos/{repo}/issues",
-                    headers=_headers(),
+                    headers=await self._headers(),
                     json=body,
                 )
                 resp.raise_for_status()
@@ -372,7 +394,7 @@ class GitHubConnector(Connector):
             async with httpx.AsyncClient(timeout=15) as client:
                 resp = await client.post(
                     f"{GITHUB_API}/repos/{repo}/issues/{issue_number}/comments",
-                    headers=_headers(),
+                    headers=await self._headers(),
                     json=body,
                 )
                 resp.raise_for_status()

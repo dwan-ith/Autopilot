@@ -18,7 +18,7 @@ objects, event types, capabilities, and safe actions. The runtime reasons over
 those capabilities rather than hardcoding one application workflow.
 
 The MVP includes a demo-mode directory for services such as Gmail, Slack,
-Google Drive, Notion, Linear, Jira, Sentry, PagerDuty, Zendesk, Web Search, and
+Google Drive, Notion, Linear, Jira, Sentry, Zendesk, Web Search, and
 Local Artifacts. Underneath that product layer, runtime adapters implement the
 currently available local capabilities: webhook ingestion, knowledge search,
 artifact writing, and notification fallback.

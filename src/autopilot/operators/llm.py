@@ -15,13 +15,11 @@ log = logging.getLogger("autopilot.llm")
 
 
 _SLOT_DEFS: list[tuple[str, str, str, str, dict]] = [
-    (
-        "openrouter-1",
-        "https://openrouter.ai/api/v1/chat/completions",
-        "OPENROUTER_API_KEY",
-        "google/gemini-2.0-flash-001",
-        {"HTTP-Referer": "https://github.com/dwan-ith/Autopilot", "X-Title": "AUTOPILOT"},
-    ),
+    # Groq slots first — fast and all keys are valid
+    ("groq-1", "https://api.groq.com/openai/v1/chat/completions", "GROQ_API_KEY", "llama-3.3-70b-versatile", {}),
+    ("groq-2", "https://api.groq.com/openai/v1/chat/completions", "GROQ_API_KEY_2", "llama-3.3-70b-versatile", {}),
+    ("groq-3", "https://api.groq.com/openai/v1/chat/completions", "GROQ_API_KEY_3", "llama-3.3-70b-versatile", {}),
+    # OpenRouter slots as fallback (key-1 has no credits; key-2 and key-3 may work)
     (
         "openrouter-2",
         "https://openrouter.ai/api/v1/chat/completions",
@@ -36,26 +34,33 @@ _SLOT_DEFS: list[tuple[str, str, str, str, dict]] = [
         "google/gemini-2.0-flash-001",
         {"HTTP-Referer": "https://github.com/dwan-ith/Autopilot", "X-Title": "AUTOPILOT"},
     ),
-    ("groq-1", "https://api.groq.com/openai/v1/chat/completions", "GROQ_API_KEY", "llama-3.3-70b-versatile", {}),
-    ("groq-2", "https://api.groq.com/openai/v1/chat/completions", "GROQ_API_KEY_2", "llama-3.3-70b-versatile", {}),
-    ("groq-3", "https://api.groq.com/openai/v1/chat/completions", "GROQ_API_KEY_3", "llama-3.3-70b-versatile", {}),
+    # Primary OpenRouter key last — has no credits, will only be tried if all others fail
+    (
+        "openrouter-1",
+        "https://openrouter.ai/api/v1/chat/completions",
+        "OPENROUTER_API_KEY",
+        "google/gemini-2.0-flash-001",
+        {"HTTP-Referer": "https://github.com/dwan-ith/Autopilot", "X-Title": "AUTOPILOT"},
+    ),
 ]
 
 _ROLE_SLOT: dict[str, int] = {
+    # Slots 0-2 = groq-1/2/3 (fast), slots 3-5 = openrouter-2/3/1 (fallback)
     "investigator": 0,
     "planner": 1,
     "verifier": 2,
     "synthesizer": 2,
-    "correlator": 3,
-    "executor": 4,
-    "validator": 4,
-    "governor": 5,
-    "memory": 5,
-    "signal evaluator": 3,
+    "correlator": 0,
+    "executor": 1,
+    "validator": 2,
+    "governor": 0,
+    "memory": 1,
+    "reflection": 2,
+    "signal evaluator": 0,
     "mission planner": 1,
     "verification gate": 2,
-    "synthesis operator": 2,
-    "adaptive replanner": 1,
+    "synthesis operator": 1,
+    "adaptive replanner": 0,
 }
 
 _DISABLE_LLM = os.getenv("AUTOPILOT_DISABLE_LLM", "").lower() in {"1", "true", "yes"}

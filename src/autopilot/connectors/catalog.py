@@ -44,7 +44,7 @@ CATALOG: list[ConnectorCatalogItem] = [
             "and create reviewed follow-up issues or comments."
         ),
         icon="GH",
-        auth_mode=AuthMode.API_KEY,
+        auth_mode=AuthMode.OAUTH,
         capabilities=[Capability.READ, Capability.SEARCH, Capability.WRITE, Capability.ACTION],
         event_types=["issues.opened", "pull_request.opened", "deployment.created", "workflow_run.completed", "push"],
         scopes=["repo", "issues:read", "issues:write", "pull_requests:read", "contents:read"],
@@ -171,25 +171,7 @@ CATALOG: list[ConnectorCatalogItem] = [
         ],
         implemented=True,
     ),
-    ConnectorCatalogItem(
-        id="pagerduty",
-        name="PagerDuty",
-        category="Observability",
-        description="Receive incidents and post reviewed incident notes. MCP-ready, adapter pending.",
-        icon="PD",
-        auth_mode=AuthMode.OAUTH,
-        capabilities=[Capability.READ, Capability.ACTION, Capability.NOTIFY],
-        event_types=["incident.triggered", "incident.resolved"],
-        scopes=["incidents.read", "incidents.write"],
-        safe_actions=["add_note"],
-        objects=["incidents", "services"],
-        tools=[
-            tool("pagerduty_read_incident", "Read PagerDuty incident context.", Capability.READ, {"incident_id": "Incident id"}, "Incident JSON"),
-            tool("pagerduty_add_note", "Add an approved incident note.", Capability.ACTION, {"incident_id": "Incident id", "note": "Note body"}, "ActionResult", ActionRisk.MEDIUM, True),
-        ],
-        demo_available=False,
-        implemented=True,
-    ),
+
     ConnectorCatalogItem(
         id="linear",
         name="Linear",

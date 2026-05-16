@@ -48,6 +48,7 @@ class ArtifactConnector(Connector):
             "mode": "local",
             "detail": "Local artifact store is available.",
             "action": action,
+            "integration_live": True,
         }
 
     async def write(self, name: str, content: str, metadata: dict | None = None) -> ActionResult:
@@ -132,6 +133,7 @@ class NotificationConnector(Connector):
                 "mode": "missing_callback",
                 "detail": "Outbound callback URL is not configured.",
                 "action": action,
+                "integration_live": False,
             }
         mode = "slack" if os.getenv("SLACK_WEBHOOK_URL") else "local_fallback"
         return {
@@ -141,6 +143,7 @@ class NotificationConnector(Connector):
             "mode": mode,
             "detail": "Slack webhook is configured." if mode == "slack" else "Will write local notification artifacts.",
             "action": action,
+            "integration_live": mode == "slack",
         }
 
     async def action(self, name: str, payload: dict) -> ActionResult:
@@ -234,6 +237,7 @@ class CloudInfraConnector(Connector):
             "mode": "webhook" if webhook else "github_actions" if gh else "local_fallback",
             "detail": "Deployment trigger ready." if configured else "No endpoint configured — writes a local artifact trigger record.",
             "action": action,
+            "integration_live": configured,
         }
 
     async def action(self, name: str, payload: dict) -> ActionResult:

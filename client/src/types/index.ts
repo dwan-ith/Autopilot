@@ -137,6 +137,8 @@ export interface ConnectorReadiness {
   mode: string;
   detail: string;
   action?: string;
+  /** True when outbound calls use real credentials (OAuth/token/env), not anonymous/fallback tiers */
+  integration_live?: boolean;
 }
 
 export interface ConnectorToolSpec {
@@ -174,4 +176,10 @@ export interface ConnectorDirectoryItem {
   connection_auth_mode?: string;
   credentials_ref?: string;
   connection_metadata?: Record<string, unknown>;
+  /** True when a usable OAuth access token exists in SQLite for this connector id */
+  oauth_token_present?: boolean;
+  /** Directory row reflects non-demo credentials (OAuth token store or saved refs); webhook/API rows may still require runtime env */
+  live_connected?: boolean;
+  /** Persisted demo / simulated connection row */
+  is_demo_connection?: boolean;
 }

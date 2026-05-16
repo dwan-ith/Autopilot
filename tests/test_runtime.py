@@ -25,7 +25,6 @@ from autopilot.connectors.gmail import GmailConnector
 from autopilot.connectors.google_drive import GoogleDriveConnector
 from autopilot.connectors.knowledge import KnowledgeConnector
 from autopilot.connectors.notion import NotionConnector
-from autopilot.connectors.pagerduty import PagerDutyConnector
 from autopilot.connectors.service import ConnectorDirectory
 from autopilot.connectors.weather import WeatherConnector
 from autopilot.connectors.webhook import SentryConnector, WebhookConnector
@@ -59,7 +58,15 @@ class FakeIssueConnector(Connector):
     )
 
     def readiness(self, action=None):
-        return {"configured": True, "action_ready": True, "missing": [], "mode": "test", "detail": "ready.", "action": action}
+        return {
+            "configured": True,
+            "action_ready": True,
+            "missing": [],
+            "mode": "test",
+            "detail": "ready.",
+            "action": action,
+            "integration_live": True,
+        }
 
     async def action(self, name, payload):
         return ActionResult(connector=self.manifest.name, action=name, status="complete",
@@ -252,9 +259,20 @@ class RuntimeKernelTest(unittest.TestCase):
         slack = next(item for item in reloaded if item["id"] == "slack")
         self.assertEqual(slack["status"], "connected")
         self.assertTrue(slack["implemented"])
+        self.assertTrue(slack["live_connected"])
         gmail = next(item for item in reloaded if item["id"] == "gmail")
         self.assertTrue(gmail["implemented"])
         self.assertIn("gmail.readonly", gmail["scopes"])
+
+    def test_demo_connector_directory_is_not_live_connected(self):
+        tmp = Path.cwd() / ".tmp"
+        tmp.mkdir(exist_ok=True)
+        store = Store(tmp / f"autopilot-{uuid4().hex}.db")
+        directory = ConnectorDirectory(store)
+        directory.connect("slack", auth_mode=AuthMode.DEMO)
+        slack = next(item for item in directory.list() if item["id"] == "slack")
+        self.assertFalse(slack["live_connected"])
+        self.assertTrue(slack["is_demo_connection"])
 
     def test_operator_catalog_exposes_configured_and_unconfigured_operators(self):
         old_store, old_registry, old_directory = api_main.store, api_main.registry, api_main.directory
@@ -271,9 +289,15 @@ class RuntimeKernelTest(unittest.TestCase):
             for key in ["github", "gmail", "google_drive", "local_artifacts", "slack", "weather"]:
                 self.assertIn(key, operators)
                 self.assertTrue(operators[key]["tools"] or operators[key]["safe_actions"])
-            # GitHub now always reports configured:True — anonymous public search active
-            self.assertTrue(operators["github"]["configured"])
-            self.assertEqual(operators["github"]["readiness"]["mode"], "anonymous_public")
+            gh_mode = operators["github"]["readiness"]["mode"]
+            self.assertIn(
+                gh_mode,
+                {"anonymous_public", "oauth", "authenticated"},
+                msg=f"Unexpected GitHub readiness mode: {gh_mode}",
+            )
+            if gh_mode == "anonymous_public":
+                self.assertFalse(operators["github"]["configured"])
+                self.assertFalse(operators["github"]["readiness"].get("integration_live"))
             self.assertTrue(operators["weather"]["configured"])
         finally:
             api_main.store, api_main.registry, api_main.directory = old_store, old_registry, old_directory
@@ -307,17 +331,21 @@ class RuntimeKernelTest(unittest.TestCase):
 
     def test_operator_action_contracts_match_declared_safe_actions(self):
         async def scenario():
-            gmail = await GmailConnector().action("draft_reply", {"thread_id": "t1", "to": "ops@example.com", "body": "hello"})
-            self.assertEqual(gmail.action, "draft_reply")
-            self.assertEqual(gmail.status, "blocked")
+            with (
+                patch("autopilot.connectors.gmail.get_valid_token", new_callable=AsyncMock, return_value=None),
+                patch("autopilot.connectors.google_drive.get_valid_token", new_callable=AsyncMock, return_value=None),
+            ):
+                gmail = await GmailConnector().action("draft_reply", {"thread_id": "t1", "to": "ops@example.com", "body": "hello"})
+                self.assertEqual(gmail.action, "draft_reply")
+                self.assertEqual(gmail.status, "blocked")
 
-            drive = await GoogleDriveConnector().action("create_doc", {"title": "Brief", "body": "hello"})
-            self.assertEqual(drive.action, "create_doc")
-            self.assertEqual(drive.status, "blocked")
+                drive = await GoogleDriveConnector().action("create_doc", {"title": "Brief", "body": "hello"})
+                self.assertEqual(drive.action, "create_doc")
+                self.assertEqual(drive.status, "blocked")
 
-            notion = await NotionConnector().action("create_page", {"title": "Brief", "body": "hello"})
-            self.assertEqual(notion.action, "create_page")
-            self.assertEqual(notion.status, "blocked")
+                notion = await NotionConnector().action("create_page", {"title": "Brief", "body": "hello"})
+                self.assertEqual(notion.action, "create_page")
+                self.assertEqual(notion.status, "blocked")
         asyncio.run(scenario())
 
     def test_weather_connector_has_no_key_fallback(self):
@@ -325,6 +353,7 @@ class RuntimeKernelTest(unittest.TestCase):
         try:
             readiness = WeatherConnector().readiness()
             self.assertTrue(readiness["configured"])
+            self.assertFalse(readiness["integration_live"])
             self.assertEqual(readiness["mode"], "open_meteo_fallback")
         finally:
             if old_key:
@@ -360,10 +389,10 @@ class RuntimeKernelTest(unittest.TestCase):
             tmp = Path.cwd() / ".tmp"; tmp.mkdir(exist_ok=True)
             store = Store(tmp / f"autopilot-{uuid4().hex}.db")
             runtime = RuntimeKernel(store, default_registry(), correlation_window_seconds=0.01)
-            key = "pagerduty:incident:123"
-            first = await runtime.ingest(Signal(source="pagerduty", type="incident.triggered",
+            key = "monitoring:alert:duplicate-test-123"
+            first = await runtime.ingest(Signal(source="monitoring", type="alert_firing",
                 summary="Checkout latency p95 is above SLA.", entities=["checkout"], urgency="high", idempotency_key=key))
-            second = await runtime.ingest(Signal(source="pagerduty", type="incident.triggered",
+            second = await runtime.ingest(Signal(source="monitoring", type="alert_firing",
                 summary="Checkout latency p95 is above SLA.", entities=["checkout"], urgency="high", idempotency_key=key))
             await runtime.wait_for(first.id)
             self.assertEqual(first.id, second.id)
@@ -465,31 +494,6 @@ class RuntimeKernelTest(unittest.TestCase):
             self.assertTrue(any("export" in t.lower() or "rollout" in t.lower() for t in titles))
             for r in results:
                 self.assertGreater(r.confidence, 0.0)
-        asyncio.run(scenario())
-
-    def test_pagerduty_connector_webhook_normalization(self):
-        """PagerDuty V3 webhook shape must normalize correctly."""
-        async def scenario():
-            connector = PagerDutyConnector()
-            signal = await connector.normalize_event({
-                "event": {
-                    "event_type": "incident.triggered",
-                    "data": {
-                        "incident": {
-                            "id": "P123ABC",
-                            "title": "Database latency spike",
-                            "urgency": "high",
-                            "status": "triggered",
-                            "incident_key": "key-abc-123",
-                            "service": {"name": "payments-db", "summary": "Payments DB"},
-                        }
-                    }
-                }
-            })
-            self.assertEqual(signal.source, "pagerduty")
-            self.assertIn("payments-db", signal.entities)
-            self.assertEqual(signal.urgency, "critical")
-            self.assertEqual(signal.idempotency_key, "pagerduty:key-abc-123")
         asyncio.run(scenario())
 
     def test_artifact_connector_write_report(self):

@@ -26,7 +26,6 @@ from autopilot.connectors.linear import LinearConnector
 from autopilot.connectors.gmail import GmailConnector
 from autopilot.connectors.google_drive import GoogleDriveConnector
 from autopilot.connectors.notion import NotionConnector
-from autopilot.connectors.pagerduty import PagerDutyConnector
 from autopilot.connectors.tavily import TavilyConnector
 from autopilot.connectors.weather import WeatherConnector
 from autopilot.connectors.webhook import SentryConnector, WebhookConnector
@@ -36,8 +35,12 @@ from autopilot.connectors.oauth import (
     SCOPES_DRIVE,
     SCOPES_GMAIL,
     build_google_auth_url,
+    build_github_auth_url,
     exchange_code,
+    exchange_github_code,
     google_configured,
+    github_configured,
+    mirror_google_oauth_to_siblings,
 )
 from autopilot.kernel import RuntimeKernel
 from autopilot.models import ActionResult, ApprovalStatus, AuthMode, Capability, GraphNodeKind, MissionGraphNode, Signal, StepStatus, WebhookSignalRequest, new_id, utc_now
@@ -53,7 +56,6 @@ CONNECTOR_CLASSES = {
     "slack": NotificationConnector,
     "sentry": SentryConnector,
     "webhook": WebhookConnector,
-    "pagerduty": PagerDutyConnector,
     "notion": NotionConnector,
     "tavily": TavilyConnector,
     "weather": WeatherConnector,
@@ -72,6 +74,13 @@ registry = default_registry()
 directory = ConnectorDirectory(store)
 
 runtime = RuntimeKernel(store, registry)
+
+
+def _frontend_redirect(query: str) -> RedirectResponse:
+    """Redirect back to the dashboard after OAuth (env-overridable for non-local setups)."""
+    base = os.getenv("AUTOPILOT_FRONTEND_URL", "http://localhost:3000").rstrip("/")
+    q = query.lstrip("?&")
+    return RedirectResponse(url=f"{base}/?{q}")
 
 
 def require_write_access(request: Request) -> None:
@@ -161,8 +170,57 @@ class _TokenBucket:
 _signal_rate = int(os.getenv("AUTOPILOT_SIGNAL_RATE_LIMIT", "30"))
 _signal_bucket = _TokenBucket(rate=_signal_rate / 60.0, capacity=float(_signal_rate))
 
+
+def _init_omium_sdk_if_configured() -> None:
+    """Optional official Omium SDK (see https://docs.omium.ai/docs/sdk/python-sdk).
+
+    Enabled with OMIUM_SDK_INIT=1 + OMIUM_API_KEY + ``pip install omium``.
+    TraceSink SQLite events are unchanged; dashboard tracing uses SDK / decorators.
+    """
+    log_api = logging.getLogger("autopilot.api")
+    if os.getenv("OMIUM_SDK_INIT", "").lower() not in {"1", "true", "yes"}:
+        return
+    key = os.getenv("OMIUM_API_KEY", "").strip()
+    if not key:
+        log_api.warning("OMIUM_SDK_INIT is set but OMIUM_API_KEY is empty")
+        return
+    try:
+        import omium
+    except ImportError:
+        log_api.warning(
+            "OMIUM_SDK_INIT is set but the 'omium' package is not installed "
+            "(install with: pip install omium   or   pip install '.[omium]')"
+        )
+        return
+    base = os.getenv("OMIUM_API_URL", "").strip() or None
+    try:
+        omium.init(
+            api_key=key,
+            project=os.getenv("OMIUM_PROJECT", "autopilot"),
+            api_base_url=base,
+            debug=os.getenv("OMIUM_DEBUG", "").lower() in {"1", "true", "yes"},
+        )
+        log_api.info(
+            "Omium SDK initialized for project=%s",
+            os.getenv("OMIUM_PROJECT", "autopilot"),
+        )
+    except Exception as exc:
+        log_api.warning("Omium SDK init failed (non-fatal): %s", exc)
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    # Ensure the DB schema has the composite PK migration applied
+    try:
+        import importlib.util, sys
+        spec = importlib.util.spec_from_file_location("migrate_db", ROOT / "../../../migrate_db.py")
+        if spec and spec.loader:
+            mod = importlib.util.module_from_spec(spec)
+            spec.loader.exec_module(mod)  # type: ignore[arg-type]
+            mod.migrate()
+    except Exception:
+        pass  # Non-fatal — migration already applied or script not present
+    _init_omium_sdk_if_configured()
     runtime.resume_active()
     # Optionally auto-connect demo-capable connectors on startup when enabled.
     try:
@@ -704,23 +762,51 @@ async def analytics_agents(request: Request) -> list[dict]:
 
 @app.get("/api/analytics/connectors")
 async def analytics_connectors(request: Request) -> list[dict]:
-    """Per-connector action health."""
+    """Per-connector health: merges live connection status with action history.
+    Only includes connectors that are genuinely connected/configured — never fakes data.
+    """
     require_read_access(request)
+
+    # 1. Get historical action stats (only connectors with actual mission actions)
     analytics = _StateStore(store.path)
-    return analytics.connector_health()
+    history: dict[str, dict] = {
+        c["connector"]: c for c in analytics.connector_health()
+    }
 
+    # 2. Get live readiness from every registered connector
+    result: list[dict] = []
+    seen: set[str] = set()
 
-# ── PagerDuty webhook ────────────────────────────────────────────────────────
+    for connector in registry._connectors.values():
+        name = connector.manifest.name
+        if name in seen:
+            continue
+        seen.add(name)
 
-@app.post("/webhooks/pagerduty")
-async def webhook_pagerduty(request: Request) -> dict[str, Any]:
-    """Ingest PagerDuty incident webhooks."""
-    require_write_access(request)
-    payload = await _verified_json_payload(request)
-    connector = PagerDutyConnector()
-    signal = await connector.normalize_event(payload)
-    mission = await runtime.ingest(signal)
-    return {"status": "accepted", "mission_id": mission.id, "signal_id": signal.id}
+        readiness = connector.readiness()
+        if not readiness.get("configured", False):
+            continue  # skip connectors that are not genuinely connected
+
+        stats = history.get(name, {
+            "connector": name,
+            "total": 0,
+            "complete": 0,
+            "failed": 0,
+            "skipped": 0,
+            "blocked": 0,
+        })
+
+        result.append({
+            **stats,
+            "connector": name,
+            "mode": readiness.get("mode", "unknown"),
+            "detail": readiness.get("detail", ""),
+            "configured": True,
+        })
+
+    # Sort: connectors with action history first, then alphabetically
+    result.sort(key=lambda c: (-c["total"], c["connector"]))
+    return result
 
 
 @app.post("/webhooks/jira")
@@ -752,9 +838,14 @@ async def webhook_weather(request: Request) -> dict[str, Any]:
 
 @app.get("/oauth/authorize/{connector_id}")
 async def oauth_authorize(connector_id: str) -> RedirectResponse:
-    """Redirect to Google OAuth2 consent screen for the given connector."""
+    """Redirect to OAuth2 consent screen for the given connector."""
+    if connector_id == "github":
+        if not github_configured():
+            return _frontend_redirect("error=github_oauth_not_configured")
+        return RedirectResponse(url=build_github_auth_url(state=connector_id))
+        
     if not google_configured():
-        return RedirectResponse(url="/?error=google_oauth_not_configured")
+        return _frontend_redirect("error=google_oauth_not_configured")
     scopes_map = {
         "gmail": SCOPES_GMAIL,
         "google_drive": SCOPES_DRIVE,
@@ -773,22 +864,46 @@ async def oauth_callback_google(
 ) -> RedirectResponse:
     """Handle Google OAuth2 callback: exchange code → store tokens → redirect to UI."""
     if error:
-        return RedirectResponse(url=f"/?oauth_error={error}")
+        return _frontend_redirect(f"oauth_error={error}")
     if not code:
-        return RedirectResponse(url="/?oauth_error=missing_code")
+        return _frontend_redirect("oauth_error=missing_code")
     try:
         token_data = await exchange_code(code)
         connector_id = state or "google"
         token_store = OAuthTokenStore(store.path)
-        # Save tokens for the specific connector requested
-        token_store.save(connector_id, token_data)
-        # If combined scope, also mark both gmail and drive as connected
+        # Default user mapping
+        user_id = "default_user"
+        token_store.save(connector_id, token_data, user_id)
         if connector_id == "google":
-            token_store.save("gmail", token_data)
-            token_store.save("google_drive", token_data)
-        return RedirectResponse(url=f"/?oauth_success={connector_id}")
+            token_store.save("gmail", token_data, user_id)
+            token_store.save("google_drive", token_data, user_id)
+        else:
+            mirror_google_oauth_to_siblings(token_store, token_data, user_id, connector_id)
+        return _frontend_redirect(f"oauth_success={connector_id}")
     except Exception as e:
-        return RedirectResponse(url=f"/?oauth_error={str(e)[:100]}")
+        return _frontend_redirect(f"oauth_error={str(e)[:100]}")
+
+
+@app.get("/oauth/callback/github")
+async def oauth_callback_github(
+    code: str | None = None,
+    state: str | None = None,
+    error: str | None = None,
+) -> RedirectResponse:
+    """Handle GitHub App OAuth2 callback."""
+    if error:
+        return _frontend_redirect(f"oauth_error={error}")
+    if not code:
+        return _frontend_redirect("oauth_error=missing_code")
+    try:
+        token_data = await exchange_github_code(code)
+        connector_id = state or "github"
+        token_store = OAuthTokenStore(store.path)
+        user_id = "default_user" # Real app extracts this from request session
+        token_store.save(connector_id, token_data, user_id)
+        return _frontend_redirect(f"oauth_success={connector_id}")
+    except Exception as e:
+        return _frontend_redirect(f"oauth_error={str(e)[:100]}")
 
 
 @app.delete("/oauth/revoke/{connector_id}")

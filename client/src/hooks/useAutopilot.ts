@@ -46,17 +46,24 @@ export function useAutopilot() {
 
   const fetchStaticData = useCallback(async () => {
     try {
-      const [healthRes, connRes, dirRes, provRes, approvalsRes] = await Promise.all([
+      const [healthRes, connRes, dirRes, provRes] = await Promise.all([
         axios.get(`${API_BASE}/health`),
         axios.get(`${API_BASE}/api/connectors`),
         axios.get(`${API_BASE}/api/connector-directory`),
         axios.get(`${API_BASE}/api/provider`),
-        axios.get(`${API_BASE}/api/approvals`, readConfig),
       ]);
+
+      let approvalsData: ActionApproval[] = [];
+      try {
+        const approvalsRes = await axios.get(`${API_BASE}/api/approvals`, readConfig);
+        approvalsData = approvalsRes.data;
+      } catch {
+        /* /api/approvals requires AUTOPILOT_API_KEY when set; connector hub must still refresh without it */
+      }
 
       setConnectors(connRes.data);
       setConnectorDirectory(dirRes.data);
-      setApprovals(approvalsRes.data);
+      setApprovals(approvalsData);
       setConnection((current) => ({
         ...current,
         status: current.sseConnected ? "connected" : "degraded",

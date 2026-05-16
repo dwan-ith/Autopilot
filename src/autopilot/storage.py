@@ -24,6 +24,41 @@ def _json_default(value: Any) -> str:
     return str(value)
 
 
+def _parse_connector_granted_scopes(raw: Any) -> list[str]:
+    if raw is None or raw == "":
+        return []
+    try:
+        val = json.loads(raw)
+        if isinstance(val, list):
+            return [str(x) for x in val]
+    except (json.JSONDecodeError, TypeError):
+        pass
+    return []
+
+
+def _parse_connector_metadata(raw: Any) -> dict[str, Any]:
+    if raw is None or raw == "":
+        return {}
+    try:
+        val = json.loads(raw)
+        if isinstance(val, dict):
+            return val
+    except (json.JSONDecodeError, TypeError):
+        pass
+    return {}
+
+
+def _parse_connector_connected_at(raw: Any) -> datetime | None:
+    if raw is None or raw == "":
+        return None
+    if isinstance(raw, datetime):
+        return raw
+    try:
+        return datetime.fromisoformat(str(raw).replace("Z", "+00:00"))
+    except (ValueError, TypeError):
+        return None
+
+
 class Store:
     def __init__(self, path: Path = DB_PATH):
         self.path = path
@@ -99,17 +134,20 @@ class Store:
                     created_at text not null
                 );
                 create table if not exists connector_connections (
-                    connector_id text primary key,
+                    connector_id text not null,
+                    user_id text not null default 'default_user',
                     status text not null,
                     auth_mode text not null,
                     granted_scopes text not null,
                     connected_at text,
                     credentials_ref text,
-                    metadata text not null
+                    metadata text not null,
+                    primary key (connector_id, user_id)
                 );
                 """
             )
             self._ensure_column(conn, "signals", "idempotency_key", "text")
+            self._ensure_column(conn, "connector_connections", "user_id", "text default 'default_user'")
             self._ensure_column(conn, "connector_connections", "credentials_ref", "text")
             conn.execute(
                 """
@@ -367,38 +405,40 @@ class Store:
             ).fetchall()
         return [row["value"] for row in rows]
 
-    def list_connector_connections(self) -> list[ConnectorConnection]:
+    def list_connector_connections(self, user_id: str = "default_user") -> list[ConnectorConnection]:
         with self._lock, closing(self.connect()) as conn, conn:
-            rows = conn.execute("select * from connector_connections order by connector_id").fetchall()
+            rows = conn.execute("select * from connector_connections where user_id=?", (user_id,)).fetchall()
         return [
             ConnectorConnection(
                 connector_id=row["connector_id"],
+                user_id=row["user_id"],
                 status=ConnectorStatus(row["status"]),
                 auth_mode=AuthMode(row["auth_mode"]),
-                granted_scopes=json.loads(row["granted_scopes"]),
-                connected_at=datetime.fromisoformat(row["connected_at"]) if row["connected_at"] else None,
+                granted_scopes=_parse_connector_granted_scopes(row["granted_scopes"]),
+                connected_at=_parse_connector_connected_at(row["connected_at"]),
                 credentials_ref=row["credentials_ref"],
-                metadata=json.loads(row["metadata"]),
+                metadata=_parse_connector_metadata(row["metadata"]),
             )
             for row in rows
         ]
 
-    def get_connector_connection(self, connector_id: str) -> ConnectorConnection | None:
+    def get_connector_connection(self, connector_id: str, user_id: str = "default_user") -> ConnectorConnection | None:
         with self._lock, closing(self.connect()) as conn, conn:
             row = conn.execute(
-                "select * from connector_connections where connector_id=?",
-                (connector_id,),
+                "select * from connector_connections where connector_id=? and user_id=?",
+                (connector_id, user_id),
             ).fetchone()
         if not row:
             return None
         return ConnectorConnection(
             connector_id=row["connector_id"],
+            user_id=row["user_id"],
             status=ConnectorStatus(row["status"]),
             auth_mode=AuthMode(row["auth_mode"]),
-            granted_scopes=json.loads(row["granted_scopes"]),
-            connected_at=datetime.fromisoformat(row["connected_at"]) if row["connected_at"] else None,
+            granted_scopes=_parse_connector_granted_scopes(row["granted_scopes"]),
+            connected_at=_parse_connector_connected_at(row["connected_at"]),
             credentials_ref=row["credentials_ref"],
-            metadata=json.loads(row["metadata"]),
+            metadata=_parse_connector_metadata(row["metadata"]),
         )
 
     def save_connector_connection(self, connection: ConnectorConnection) -> None:
@@ -406,11 +446,12 @@ class Store:
             conn.execute(
                 """
                 insert or replace into connector_connections
-                (connector_id, status, auth_mode, granted_scopes, connected_at, credentials_ref, metadata)
-                values (?, ?, ?, ?, ?, ?, ?)
+                (connector_id, user_id, status, auth_mode, granted_scopes, connected_at, credentials_ref, metadata)
+                values (?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     connection.connector_id,
+                    connection.user_id,
                     connection.status.value,
                     connection.auth_mode.value,
                     json.dumps(connection.granted_scopes),

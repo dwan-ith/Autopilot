@@ -22,6 +22,9 @@ dependencies = [
 dev = [
     "pytest>=8",
 ]
+omium = [
+    "omium>=0.4.1,<0.5",
+]
 
 [tool.setuptools.packages.find]
 where = ["src"]

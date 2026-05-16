@@ -22,6 +22,7 @@ class Connector(ABC):
             "mode": "ready" if configured else "missing_credentials",
             "detail": "Connector is ready." if configured else "Connector credentials are not configured.",
             "action": action,
+            "integration_live": configured,
         }
 
     async def normalize_event(self, payload: dict[str, Any]) -> Signal:

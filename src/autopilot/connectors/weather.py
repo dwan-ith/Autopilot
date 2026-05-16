@@ -66,6 +66,7 @@ class WeatherConnector(Connector):
             "mode": "openweathermap" if configured else "open_meteo_fallback",
             "detail": "OpenWeatherMap ready." if configured else "Open-Meteo fallback active; set OPENWEATHER_API_KEY for OpenWeatherMap.",
             "action": action,
+            "integration_live": configured,
         }
 
     async def read(self, ref: str) -> dict[str, Any]:

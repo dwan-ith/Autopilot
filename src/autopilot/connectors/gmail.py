@@ -98,6 +98,7 @@ class GmailConnector(Connector):
                 "mode": "oauth",
                 "detail": "Google OAuth2 credentials not configured.",
                 "action": action,
+                "integration_live": False,
             }
         authorized = self._authorized()
         return {
@@ -108,6 +109,7 @@ class GmailConnector(Connector):
             "auth_url": build_google_auth_url(state="gmail", scopes=SCOPES_GMAIL) if not authorized else None,
             "detail": "Gmail OAuth2 connected." if authorized else "Not authorized — visit auth_url to connect.",
             "action": action,
+            "integration_live": authorized,
         }
 
     async def _headers(self) -> dict[str, str] | None:

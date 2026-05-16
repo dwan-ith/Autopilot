@@ -116,8 +116,15 @@ Set the following environment variables in `.env` to enable specific features:
 | `OMIUM_PROJECT` | Omium project name (default `autopilot`). |
 | `OMIUM_API_URL` | Override Omium API base URL when needed. |
 | `OMIUM_HTTP_INGEST_URL` | Optional custom URL to POST trace-shaped JSON (advanced relay only). |
+| `GITHUB_CLIENT_ID` / `SECRET` | OAuth credentials for GitHub interactions (issue creation, commenting). |
+| `SLACK_ACCESS_TOKEN` | Required for the agent to post messages or respond to incidents. |
+| `SLACK_DEFAULT_CHANNEL` | The default channel for Slack fallback messages (e.g., `#ops`). |
+| `SENTRY_TOKEN` | Sentry API token for ingesting real error occurrences. |
+| `SENTRY_ORG` / `PROJECT` | Scopes the agent's Sentry investigations to specific repositories. |
+| `GOOGLE_CLIENT_ID` / `SECRET` | OAuth credentials for Gmail and Google Drive features. |
+| `TAVILY_API_KEY` | Upgrades the knowledge connector to perform live AI-driven web searches. |
 
-Additional connector-specific keys (e.g., `GITHUB_TOKEN`, `NOTION_API_KEY`) are documented in `.env.example`.
+Additional connector-specific keys (e.g., `GITHUB_TOKEN`, `NOTION_API_KEY`, `LINEAR_API_KEY`) are documented in `.env.example`.
 
 ## Testing
 
@@ -131,21 +138,17 @@ npm run lint
 npm run build
 ```
 
-## Hackathon demo
+## Live Demo & Autonomy
 
-Use **Backend** + **Frontend** from [Setup](#setup). Highlights:
+Use **Backend** + **Frontend** from [Setup](#setup). The UI is fully data-driven.
 
+AUTOPILOT no longer runs "canned" simulation demos. The dashboard's **Manual Signal** ingest and the **Persistent Monitor** read actual live configurations from connected services.
+
+When a webhook is received or the monitor triggers, AUTOPILOT correlates the events, expands a dynamic mission graph, spawns parallel investigations using actual search and API tools, verifies confidence, writes an evidence-backed mission brief, and surfaces policy-gated side effects (like creating a GitHub issue or posting to a Slack channel) for human-in-the-loop approval. The dashboard stream reflects these missions globally without hardcoded UI limits.
+
+Highlights:
 - `POST /api/monitoring/check` — inspect connected services and create a mission only if a real connected service is degraded.
-- `GET /api/operators` — judge-facing catalog: tools, readiness, safe actions.
+- `GET /api/operators` — live capability-driven catalog of connectors and readiness states.
 - `POST /api/operators/{id}/probe` — bounded probes with real side effects where declared.
-- `POST /api/operators/{id}/smoke` — read-only live credential proof for account connectors.
-- `GET /api/provider/health` and `POST /api/provider/preflight` — LLM slot health, quarantine, and bounded live checks.
-- `GET /api/tracing/status` and `POST /api/tracing/probe` — local/Omium trace proof status without relying on the legacy HTTP trace endpoint.
-
-Additional endpoints:
-
-- `GET /api/operators`: all operators, tool schemas, safe actions, readiness.
-- `POST /api/operators/web_search/probe`: local knowledge/web-search probe.
-- `POST /api/operators/weather/probe`: weather probe with Open-Meteo fallback when no key is set.
-- `POST /api/operators/local_artifacts/probe`: real local artifact side effect.
-- `POST /demo/fire`: deprecated compatibility alias for `/api/monitoring/check`; it no longer emits a canned export-service incident.
+- `GET /api/provider/health` — LLM slot health, quarantine status, and bounded live checks.
+- `GET /api/tracing/status` — live Omium trace proof status.

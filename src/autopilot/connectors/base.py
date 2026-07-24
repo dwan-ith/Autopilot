@@ -3,7 +3,13 @@ from __future__ import annotations
 from abc import ABC
 from typing import Any
 
-from autopilot.models import ActionResult, Capability, ConnectorManifest, Evidence, Signal
+from autopilot.models import (
+    ActionResult,
+    Capability,
+    ConnectorManifest,
+    Evidence,
+    Signal,
+)
 
 
 class Connector(ABC):

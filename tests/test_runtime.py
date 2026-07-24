@@ -13,15 +13,17 @@ import httpx
 os.environ["AUTOPILOT_DISABLE_LLM"] = "1"
 os.environ.pop("AUTOPILOT_AUTO_APPROVE_ACTIONS", None)
 
+from datetime import UTC
+
 from fastapi.testclient import TestClient
 
 import autopilot.api.main as api_main
 from autopilot.agents.base import SubAgent
 from autopilot.agents.mission.planner import PlannerAgent
 from autopilot.connectors import actions as action_connectors
+from autopilot.connectors import default_registry
 from autopilot.connectors.actions import ArtifactConnector, NotificationConnector
 from autopilot.connectors.base import Connector
-from autopilot.connectors import default_registry
 from autopilot.connectors.github_connector import GitHubConnector
 from autopilot.connectors.gmail import GmailConnector
 from autopilot.connectors.google_drive import GoogleDriveConnector
@@ -29,11 +31,11 @@ from autopilot.connectors.knowledge import KnowledgeConnector
 from autopilot.connectors.notion import NotionConnector
 from autopilot.connectors.service import ConnectorDirectory
 from autopilot.connectors.weather import WeatherConnector
-from autopilot.connectors.webhook import SentryConnector, WebhookConnector
+from autopilot.connectors.webhook import SentryConnector
+from autopilot.env_check import validate_env
 from autopilot.kernel import RuntimeKernel
 from autopilot.models import (
     ActionResult,
-    ApprovalStatus,
     AuthMode,
     Capability,
     ConnectorManifest,
@@ -212,6 +214,41 @@ class RuntimeKernelTest(unittest.TestCase):
 
     def test_actions_module_no_longer_exports_duplicate_linear_connector(self):
         self.assertFalse(hasattr(action_connectors, "LinearConnector"))
+
+    def test_env_validation_requires_crypto_key_in_production(self):
+        old_env = os.environ.get("AUTOPILOT_ENV")
+        old_key = os.environ.get("AUTOPILOT_CREDENTIAL_ENCRYPTION_KEY")
+        
+        os.environ["AUTOPILOT_ENV"] = "production"
+        if "AUTOPILOT_CREDENTIAL_ENCRYPTION_KEY" in os.environ:
+            del os.environ["AUTOPILOT_CREDENTIAL_ENCRYPTION_KEY"]
+            
+        try:
+            with self.assertRaises(EnvironmentError) as context:
+                validate_env()
+            self.assertIn("AUTOPILOT_CREDENTIAL_ENCRYPTION_KEY", str(context.exception))
+        finally:
+            if old_env is not None: os.environ["AUTOPILOT_ENV"] = old_env
+            else: del os.environ["AUTOPILOT_ENV"]
+            
+            if old_key is not None: os.environ["AUTOPILOT_CREDENTIAL_ENCRYPTION_KEY"] = old_key
+
+    def test_env_validation_allows_missing_crypto_key_in_development(self):
+        old_env = os.environ.get("AUTOPILOT_ENV")
+        old_key = os.environ.get("AUTOPILOT_CREDENTIAL_ENCRYPTION_KEY")
+        
+        os.environ["AUTOPILOT_ENV"] = "development"
+        if "AUTOPILOT_CREDENTIAL_ENCRYPTION_KEY" in os.environ:
+            del os.environ["AUTOPILOT_CREDENTIAL_ENCRYPTION_KEY"]
+            
+        try:
+            # Should not raise
+            validate_env()
+        finally:
+            if old_env is not None: os.environ["AUTOPILOT_ENV"] = old_env
+            else: del os.environ["AUTOPILOT_ENV"]
+            
+            if old_key is not None: os.environ["AUTOPILOT_CREDENTIAL_ENCRYPTION_KEY"] = old_key
 
     def test_llm_slot_retries_rate_limit_before_fallback(self):
         class FakeClient:
@@ -739,16 +776,17 @@ class RuntimeKernelTest(unittest.TestCase):
 
     def test_store_list_missions_returns_latest_first(self):
         """list_missions must return missions ordered by updated_at descending."""
-        from datetime import datetime, timezone, timedelta
+        from datetime import datetime
+
         from autopilot.models import Mission
         tmp = Path.cwd() / ".tmp"; tmp.mkdir(exist_ok=True)
         store = Store(tmp / f"autopilot-{uuid4().hex}.db")
         m1 = Mission(title="First", summary="first",
-                     created_at=datetime(2025, 1, 1, tzinfo=timezone.utc),
-                     updated_at=datetime(2025, 1, 1, tzinfo=timezone.utc))
+                     created_at=datetime(2025, 1, 1, tzinfo=UTC),
+                     updated_at=datetime(2025, 1, 1, tzinfo=UTC))
         m2 = Mission(title="Second", summary="second",
-                     created_at=datetime(2025, 1, 2, tzinfo=timezone.utc),
-                     updated_at=datetime(2025, 1, 2, tzinfo=timezone.utc))
+                     created_at=datetime(2025, 1, 2, tzinfo=UTC),
+                     updated_at=datetime(2025, 1, 2, tzinfo=UTC))
         store.create_mission(m1)
         store.create_mission(m2)
         missions = store.list_missions()

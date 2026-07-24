@@ -14,12 +14,19 @@ Uses the OpenRouter-1 slot (highest quality) for deep evidence reasoning.
 
 from __future__ import annotations
 
-import asyncio
 import logging
-from typing import Any
 
-from autopilot.agents.base import AgentResult, Orchestrator, SubAgent, Tool
-from autopilot.models import AgentRun, Evidence, GraphNodeKind, Hypothesis, Mission, MissionGraphNode, StepStatus, utc_now
+from autopilot.agents.base import AgentResult, Orchestrator, Tool
+from autopilot.models import (
+    AgentRun,
+    Evidence,
+    GraphNodeKind,
+    Hypothesis,
+    Mission,
+    MissionGraphNode,
+    StepStatus,
+    utc_now,
+)
 
 log = logging.getLogger("autopilot.agents.investigator")
 

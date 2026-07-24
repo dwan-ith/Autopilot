@@ -1,0 +1,55 @@
+{
+  "bad_slots": {
+    "groq-1": {
+      "reason": "HTTP 429 rate-limited after 2 attempt(s)",
+      "until": 1784827088.5085788
+    },
+    "groq-2": {
+      "reason": "HTTP 429 rate-limited after 2 attempt(s)",
+      "until": 1784827095.5328593
+    },
+    "groq-3": {
+      "reason": "HTTP 429 rate-limited after 2 attempt(s)",
+      "until": 1784827122.8746853
+    }
+  },
+  "slot_status": {
+    "groq-1": {
+      "detail": "HTTP 429 rate-limited after 2 attempt(s)",
+      "last_checked_at": 1784826998.5085814,
+      "quarantined_until": 1784827088.5085788,
+      "status": "quarantined"
+    },
+    "groq-2": {
+      "detail": "HTTP 429 rate-limited after 2 attempt(s)",
+      "last_checked_at": 1784827005.5328631,
+      "quarantined_until": 1784827095.5328593,
+      "status": "quarantined"
+    },
+    "groq-3": {
+      "detail": "HTTP 429 rate-limited after 2 attempt(s)",
+      "last_checked_at": 1784827032.8746898,
+      "quarantined_until": 1784827122.8746853,
+      "status": "quarantined"
+    },
+    "openrouter-1": {
+      "detail": "last call succeeded",
+      "last_checked_at": 1784826982.8293426,
+      "quarantined_until": null,
+      "status": "healthy"
+    },
+    "openrouter-2": {
+      "detail": "last call succeeded",
+      "last_checked_at": 1784827014.437335,
+      "quarantined_until": null,
+      "status": "healthy"
+    },
+    "openrouter-3": {
+      "detail": "last call succeeded",
+      "last_checked_at": 1784827024.3642993,
+      "quarantined_until": null,
+      "status": "healthy"
+    }
+  },
+  "updated_at": 1784827032.8758605
+}

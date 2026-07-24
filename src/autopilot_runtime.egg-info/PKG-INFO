@@ -1,0 +1,174 @@
+Metadata-Version: 2.4
+Name: autopilot-runtime
+Version: 0.2.0
+Summary: Autonomous operator runtime for policy-gated operational missions.
+License: MIT
+Requires-Python: >=3.11
+Description-Content-Type: text/markdown
+License-File: LICENSE
+Requires-Dist: fastapi==0.124.0
+Requires-Dist: uvicorn[standard]==0.38.0
+Requires-Dist: pydantic==2.12.5
+Requires-Dist: python-dotenv==1.0.1
+Requires-Dist: httpx==0.28.1
+Requires-Dist: python-multipart==0.0.20
+Provides-Extra: dev
+Requires-Dist: pytest>=8; extra == "dev"
+Provides-Extra: omium
+Requires-Dist: omium<0.5,>=0.4.1; extra == "omium"
+Dynamic: license-file
+
+# AUTOPILOT
+
+AUTOPILOT is an autonomous operator runtime that processes operational signals, coordinates investigation agents, and safely executes policy-gated actions. It uses an LLM-backed reasoning loop to automate incident response workflows, such as searching runbooks, querying external APIs, and posting status updates.
+
+The platform is built around strict policy gates and human-in-the-loop approvals to ensure safe side effects in connected environments.
+
+## Features
+
+- **Event Correlation**: Ingests signals via webhooks and aggregates related events into active missions.
+- **Agent Swarm**: Uses a ReAct-based agent loop to gather evidence across connected tools.
+- **Policy Engine**: Enforces rules based on connector capabilities, risk levels, and confidence thresholds.
+- **Human-in-the-Loop**: High-risk actions require explicit approval from the dashboard before execution.
+- **Observability**: SQLite-backed trace store for every operator step, tool transition, and mission lifecycle event.
+
+### Omium (optional dashboard tracing)
+
+The hosted Omium platform uses the **Python SDK** (`omium.init`, `@omium.trace`) and/or its
+**REST execution API** — not a generic `POST …/traces` JSON dump. To enable the official client:
+
+```bash
+pip install ".[omium]"
+```
+
+Set `OMIUM_SDK_INIT=1`, `OMIUM_API_KEY`, and optionally `OMIUM_PROJECT` / `OMIUM_API_URL`.
+For a **custom HTTP relay** of SQLite-shaped events only, set `OMIUM_HTTP_INGEST_URL`
+(compatible with `X-API-Key` auth) in addition to `OMIUM_API_KEY`.
+
+- **Local Fallback**: Can run in a deterministic, heuristic mode without an LLM provider for testing and validation.
+
+## Architecture 
+
+The pipeline processes missions through nine discrete stages:
+1. Memory Check
+2. Signal Correlation
+3. Planning
+4. Investigation
+5. Verification
+6. Adaptive Replanning (if confidence is low)
+7. Action Synthesis
+8. Action Publishing
+9. Final Validation
+
+AUTOPILOT can also run as a persistent connected-service monitor. Set
+`AUTOPILOT_PERSISTENT_MONITORING=1` to make the backend periodically inspect
+the connector directory, check runtime readiness, and open an autonomous
+mission only when a connected service is degraded. The dashboard's **Check
+Services** control runs the same monitor once on demand.
+
+## Connectors
+
+AUTOPILOT integrates with external systems via connectors. Each connector exposes specific read/write capabilities and tools to the agent swarm. 
+
+Implemented integrations include:
+- **GitHub**: Search issues/PRs, create issues, post comments.
+- **Linear**: Create issues.
+- **Communication**: Slack (notifications), Gmail (draft/send replies).
+- **Knowledge**: Local runbooks, Google Drive, Notion, Tavily.
+- **Observability**: Sentry, Weather.
+- **System**: Durable artifacts and generic webhooks.
+
+Connector readiness is explicit. Some connectors require user credentials for
+real side effects, while others have useful no-key fallbacks:
+
+- **No-key/demo-capable**: local artifacts, local Slack fallback, generic webhooks, local runbooks, Tavily fallback, weather via Open-Meteo.
+- **Optional-key upgraded**: GitHub public search without a token, authenticated/private GitHub with `GITHUB_TOKEN`; weather via OpenWeather with `OPENWEATHER_API_KEY`; Tavily AI search with `TAVILY_API_KEY`.
+- **Account/OAuth/API-key required for real side effects**: Gmail, Google Drive, Notion, Linear, PagerDuty notes, Slack webhook delivery.
+
+## Setup
+
+### Backend
+
+```bash
+python -m venv .venv
+# On Windows: .venv\Scripts\activate
+# On Unix: source .venv/bin/activate
+pip install -e ".[dev]"
+cp .env.example .env
+# Edit .env with your LLM and connector credentials
+python run_server.py
+```
+Backend runs at: `http://localhost:8090`
+
+### Frontend
+
+```bash
+cd client
+npm install
+npm run dev
+```
+Dashboard runs at: `http://localhost:3000`
+
+### Docker
+
+```bash
+docker compose up --build
+```
+
+## Configuration
+
+Set the following environment variables in `.env` to enable specific features:
+
+| Variable | Description |
+|---|---|
+| `AUTOPILOT_API_KEY` | Protects API endpoints and webhooks. |
+| `AUTOPILOT_WEBHOOK_SECRET` | Enables HMAC signature verification for inbound webhooks. |
+| `AUTOPILOT_DISABLE_LLM=1` | Runs the system in offline, deterministic heuristic mode. |
+| `AUTOPILOT_PROVIDER_PREFLIGHT_ON_STARTUP` | `1` to run provider preflight at startup and quarantine bad LLM slots before missions. |
+| `AUTOPILOT_LLM_TIMEOUT_SECONDS` | Per-provider LLM request timeout. |
+| `AUTOPILOT_LLM_MAX_RETRY_DELAY_SECONDS` | Maximum delay honored for provider retry/backoff during demos. |
+| `AUTOPILOT_PERSISTENT_MONITORING=1` | Enables background monitoring of connected services. |
+| `AUTOPILOT_MONITOR_INTERVAL_SECONDS` | Background monitor interval, minimum 30 seconds. |
+| `OPENROUTER_API_KEY` | Primary LLM provider key (recommended). |
+| `GROQ_API_KEY` | Fallback LLM provider key. |
+| `OMIUM_API_KEY` | Omium SDK/API authentication (required when Omium integration is enabled). |
+| `OMIUM_SDK_INIT` | `1` to call `omium.init()` at startup (after `pip install ".[omium]"`). |
+| `OMIUM_PROJECT` | Omium project name (default `autopilot`). |
+| `OMIUM_API_URL` | Override Omium API base URL when needed. |
+| `OMIUM_HTTP_INGEST_URL` | Optional custom URL to POST trace-shaped JSON (advanced relay only). |
+| `GITHUB_CLIENT_ID` / `SECRET` | OAuth credentials for GitHub interactions (issue creation, commenting). |
+| `SLACK_ACCESS_TOKEN` | Required for the agent to post messages or respond to incidents. |
+| `SLACK_DEFAULT_CHANNEL` | The default channel for Slack fallback messages (e.g., `#ops`). |
+| `SENTRY_TOKEN` | Sentry API token for ingesting real error occurrences. |
+| `SENTRY_ORG` / `PROJECT` | Scopes the agent's Sentry investigations to specific repositories. |
+| `GOOGLE_CLIENT_ID` / `SECRET` | OAuth credentials for Gmail and Google Drive features. |
+| `TAVILY_API_KEY` | Upgrades the knowledge connector to perform live AI-driven web searches. |
+
+Additional connector-specific keys (e.g., `GITHUB_TOKEN`, `NOTION_API_KEY`, `LINEAR_API_KEY`) are documented in `.env.example`.
+
+## Testing
+
+```bash
+# Run backend test suite
+python -m pytest tests/ -v
+
+# Check frontend types and linting
+cd client
+npm run lint
+npm run build
+```
+
+## Live Demo & Autonomy
+
+Use **Backend** + **Frontend** from [Setup](#setup). The UI is fully data-driven.
+
+AUTOPILOT no longer runs "canned" simulation demos. The dashboard's **Manual Signal** ingest and the **Persistent Monitor** read actual live configurations from connected services.
+
+When a webhook is received or the monitor triggers, AUTOPILOT correlates the events, expands a dynamic mission graph, spawns parallel investigations using actual search and API tools, verifies confidence, writes an evidence-backed mission brief, and surfaces policy-gated side effects (like creating a GitHub issue or posting to a Slack channel) for human-in-the-loop approval. The dashboard stream reflects these missions globally without hardcoded UI limits.
+
+Highlights:
+- `POST /api/monitoring/check` — inspect connected services and create a mission only if a real connected service is degraded.
+- `GET /api/operators` — live capability-driven catalog of connectors and readiness states.
+- `POST /api/operators/{id}/probe` — bounded probes with real side effects where declared.
+- `GET /api/provider/health` — LLM slot health, quarantine status, and bounded live checks.
+- `GET /api/tracing/status` — live Omium trace proof status.

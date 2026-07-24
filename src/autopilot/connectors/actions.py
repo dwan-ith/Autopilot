@@ -8,7 +8,13 @@ from pathlib import Path
 import httpx
 
 from autopilot.connectors.base import Connector
-from autopilot.models import ActionResult, ActionRisk, Capability, ConnectorManifest, ConnectorToolSpec
+from autopilot.models import (
+    ActionResult,
+    ActionRisk,
+    Capability,
+    ConnectorManifest,
+    ConnectorToolSpec,
+)
 from autopilot.storage import ARTIFACT_DIR
 
 log = logging.getLogger(__name__)
@@ -185,7 +191,7 @@ class NotificationConnector(Connector):
                     summary="Posted outbound webhook callback.",
                     metadata={"mode": "webhook_callback", "status_code": response.status_code},
                 )
-            except Exception as exc:
+            except (OSError, KeyError, ValueError) as exc:
                 return ActionResult(
                     connector=self.manifest.name,
                     action=name,
@@ -260,7 +266,7 @@ class NotificationConnector(Connector):
 class CloudInfraConnector(Connector):
     manifest = ConnectorManifest(
         name="cloud_infra",
-        description="Triggers one demoable deployment action through a webhook or GitHub Actions dispatch.",
+        description="Triggers a policy-approved deployment through a webhook or GitHub Actions dispatch.",
         capabilities=[Capability.ACTION],
         event_types=[],
         safe_actions=["trigger_deployment"],

@@ -17,7 +17,6 @@ Mission subagents (spawned per mission):
 from __future__ import annotations
 
 import logging
-from datetime import datetime, timezone
 from typing import Any
 
 from autopilot.agents.base import Tool
@@ -30,18 +29,14 @@ from autopilot.agents.persistent.correlator import CorrelatorAgent
 from autopilot.agents.persistent.governor import GovernorAgent
 from autopilot.agents.persistent.memory import MemoryAgent
 from autopilot.agents.persistent.verifier import VerifierAgent
-from autopilot.connectors.base import Connector, ConnectorRegistry
+from autopilot.connectors.base import ConnectorRegistry
 from autopilot.models import (
     ActionApproval,
     ActionResult,
     Capability,
-    Evidence,
     Hypothesis,
     Mission,
-    PolicyDecision,
-    utc_now,
 )
-from autopilot.policy import PolicyEngine
 
 log = logging.getLogger("autopilot.operators")
 

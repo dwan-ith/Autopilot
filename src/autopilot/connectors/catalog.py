@@ -8,7 +8,13 @@ by the runtime until a real adapter exists.
 
 from __future__ import annotations
 
-from autopilot.models import ActionRisk, AuthMode, Capability, ConnectorCatalogItem, ConnectorToolSpec
+from autopilot.models import (
+    ActionRisk,
+    AuthMode,
+    Capability,
+    ConnectorCatalogItem,
+    ConnectorToolSpec,
+)
 
 
 def tool(
@@ -166,7 +172,6 @@ CATALOG: list[ConnectorCatalogItem] = [
         safe_actions=["mark_investigating"],
         objects=["errors", "issues", "stack traces"],
         tools=[
-            tool("sentry_ingest_issue", "Normalize Sentry issue webhooks.", Capability.READ, {"payload": "Webhook payload"}, "Signal"),
             tool("sentry_search_issues", "Search issue and stack-trace context.", Capability.SEARCH, {"query": "Error, project, or culprit query"}, "Evidence[]"),
         ],
         implemented=True,
@@ -179,12 +184,13 @@ CATALOG: list[ConnectorCatalogItem] = [
         description="Create Linear issues for high-confidence missions when credentials are configured.",
         icon="LN",
         auth_mode=AuthMode.API_KEY,
-        capabilities=[Capability.WRITE, Capability.ACTION],
-        scopes=["issues.write"],
+        capabilities=[Capability.READ, Capability.SEARCH, Capability.WRITE, Capability.ACTION],
+        scopes=["issues.read", "issues.write"],
         safe_actions=["create_issue"],
         implemented_actions=["create_issue"],
         objects=["issues"],
         tools=[
+            tool("linear_search_issues", "Search Linear issues and known bugs.", Capability.SEARCH, {"query": "Issue search query"}, "Evidence[]"),
             tool("linear_create_issue", "Create an approved Linear issue.", Capability.ACTION, {"title": "Issue title", "description": "Issue description"}, "ActionResult", ActionRisk.MEDIUM, True),
         ],
         implemented=True,
@@ -243,5 +249,30 @@ CATALOG: list[ConnectorCatalogItem] = [
 ]
 
 
+def __load_mcp_configs() -> list[ConnectorCatalogItem]:
+    from autopilot.connectors.mcp import load_mcp_server_configs
+
+    return [
+        ConnectorCatalogItem(
+            id=config.id,
+            name=config.display_name,
+            category="External (MCP)",
+            description=config.description or f"Configured {config.transport} MCP server.",
+            icon="MC",
+            auth_mode=AuthMode.MCP,
+            capabilities=[],
+            scopes=["mcp.tools"],
+            safe_actions=list(config.allowed_write_tools),
+            objects=["mcp_tools"],
+            tools=[],
+            demo_available=False,
+            implemented=True,
+        )
+        for config in load_mcp_server_configs()
+    ]
+
+
 def catalog_by_id() -> dict[str, ConnectorCatalogItem]:
-    return {item.id: item for item in CATALOG}
+    dynamic_items = __load_mcp_configs()
+    all_catalogs = CATALOG + dynamic_items
+    return {item.id: item for item in all_catalogs}

@@ -16,8 +16,13 @@ from typing import Any
 import httpx
 
 from autopilot.connectors.base import Connector
-from autopilot.models import Capability, ConnectorManifest, ConnectorToolSpec, Evidence, Signal
-
+from autopilot.models import (
+    Capability,
+    ConnectorManifest,
+    ConnectorToolSpec,
+    Evidence,
+    Signal,
+)
 
 WEATHER_API = "https://api.openweathermap.org/data/2.5"
 OPEN_METEO_GEOCODE = "https://geocoding-api.open-meteo.com/v1/search"
@@ -155,7 +160,7 @@ class WeatherConnector(Connector):
                     "clouds_pct": current.get("cloud_cover"),
                     "provider": "open_meteo",
                 }
-        except Exception as e:
+        except (httpx.RequestError, httpx.HTTPStatusError, KeyError, ValueError) as e:
             return {"ref": ref, "error": str(e), "provider": "open_meteo"}
 
     async def search(self, query: str) -> list[Evidence]:
@@ -190,6 +195,12 @@ class WeatherConnector(Connector):
     def as_tools(self):
         from autopilot.agents.base import Tool
         return [
+            Tool(
+                name="weather_current",
+                description="Read current weather for a city or coordinates.",
+                parameters={"ref": "City name or 'lat,lon' coordinates"},
+                fn=self.read,
+            ),
             Tool(
                 name="weather_search",
                 description="Get current weather for a location. Use when correlating outages with storms or environmental events.",

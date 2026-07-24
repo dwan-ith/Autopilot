@@ -14,14 +14,19 @@ Env vars needed:
 
 from __future__ import annotations
 
+import base64
+import hashlib
+import hmac
 import json
 import os
+import secrets
 import time
 from pathlib import Path
 from typing import Any
 from urllib.parse import urlencode
 
 import httpx
+from cryptography.fernet import Fernet, InvalidToken
 
 # ── Constants ────────────────────────────────────────────────────────────────
 
@@ -41,6 +46,105 @@ SCOPES_DRIVE = [
 ]
 
 SCOPES_COMBINED = list(dict.fromkeys(SCOPES_GMAIL + SCOPES_DRIVE))  # deduplicated
+_OAUTH_STATE_FALLBACK_SECRET = secrets.token_bytes(32)
+_OAUTH_STATE_TTL_SECONDS = 10 * 60
+_ENCRYPTED_TOKEN_PREFIX = "fernet:v1:"
+
+
+def _urlsafe_encode(value: bytes) -> str:
+    return base64.urlsafe_b64encode(value).rstrip(b"=").decode("ascii")
+
+
+def _urlsafe_decode(value: str) -> bytes:
+    return base64.urlsafe_b64decode(value + "=" * (-len(value) % 4))
+
+
+def _oauth_state_secret() -> bytes:
+    configured = (
+        os.getenv("AUTOPILOT_OAUTH_STATE_SECRET", "").strip()
+        or os.getenv("AUTOPILOT_API_KEY", "").strip()
+    )
+    return configured.encode("utf-8") if configured else _OAUTH_STATE_FALLBACK_SECRET
+
+
+def _token_fernet() -> Fernet | None:
+    material = (
+        os.getenv("AUTOPILOT_CREDENTIAL_ENCRYPTION_KEY", "").strip()
+        or os.getenv("AUTOPILOT_API_KEY", "").strip()
+    )
+    if not material:
+        return None
+    key = base64.urlsafe_b64encode(hashlib.sha256(material.encode("utf-8")).digest())
+    return Fernet(key)
+
+
+def oauth_token_encryption_enabled() -> bool:
+    return _token_fernet() is not None
+
+
+def _encode_token_payload(token_data: dict[str, Any]) -> str:
+    raw = json.dumps(token_data, separators=(",", ":")).encode("utf-8")
+    fernet = _token_fernet()
+    if fernet is None:
+        return raw.decode("utf-8")
+    return _ENCRYPTED_TOKEN_PREFIX + fernet.encrypt(raw).decode("ascii")
+
+
+def _decode_token_payload(payload: str) -> dict[str, Any] | None:
+    raw = payload
+    if payload.startswith(_ENCRYPTED_TOKEN_PREFIX):
+        fernet = _token_fernet()
+        if fernet is None:
+            return None
+        try:
+            raw = fernet.decrypt(
+                payload[len(_ENCRYPTED_TOKEN_PREFIX):].encode("ascii")
+            ).decode("utf-8")
+        except (InvalidToken, UnicodeDecodeError):
+            return None
+    try:
+        value = json.loads(raw)
+    except json.JSONDecodeError:
+        return None
+    return value if isinstance(value, dict) else None
+
+
+def build_oauth_state(provider: str, connector_id: str) -> str:
+    """Create a signed, short-lived OAuth state token."""
+    payload = {
+        "provider": provider,
+        "connector_id": connector_id,
+        "issued_at": int(time.time()),
+        "nonce": secrets.token_urlsafe(16),
+    }
+    encoded = _urlsafe_encode(json.dumps(payload, separators=(",", ":"), sort_keys=True).encode("utf-8"))
+    signature = hmac.new(_oauth_state_secret(), encoded.encode("ascii"), hashlib.sha256).digest()
+    return f"{encoded}.{_urlsafe_encode(signature)}"
+
+
+def verify_oauth_state(state: str | None, provider: str) -> str:
+    """Validate OAuth state integrity, age, provider, and connector scope."""
+    if not state or "." not in state:
+        raise ValueError("missing_or_invalid_oauth_state")
+    encoded, supplied_signature = state.split(".", 1)
+    expected = hmac.new(_oauth_state_secret(), encoded.encode("ascii"), hashlib.sha256).digest()
+    try:
+        supplied = _urlsafe_decode(supplied_signature)
+        payload = json.loads(_urlsafe_decode(encoded))
+    except (ValueError, json.JSONDecodeError, UnicodeDecodeError) as exc:
+        raise ValueError("invalid_oauth_state") from exc
+    if not hmac.compare_digest(expected, supplied):
+        raise ValueError("invalid_oauth_state")
+    issued_at = int(payload.get("issued_at", 0))
+    if issued_at <= 0 or abs(int(time.time()) - issued_at) > _OAUTH_STATE_TTL_SECONDS:
+        raise ValueError("expired_oauth_state")
+    if payload.get("provider") != provider:
+        raise ValueError("oauth_provider_mismatch")
+    connector_id = str(payload.get("connector_id", ""))
+    allowed = {"github"} if provider == "github" else {"gmail", "google_drive", "google"}
+    if connector_id not in allowed:
+        raise ValueError("invalid_oauth_connector")
+    return connector_id
 
 
 def _scopes_json(token_data: dict[str, Any]) -> str:
@@ -178,7 +282,7 @@ async def exchange_github_code(code: str) -> dict[str, Any]:
 
 
 def mirror_google_oauth_to_siblings(
-    token_store: "OAuthTokenStore",
+    token_store: OAuthTokenStore,
     token_data: dict[str, Any],
     user_id: str,
     origin_connector_id: str,
@@ -235,7 +339,7 @@ class OAuthTokenStore:
         return conn
 
     def save(self, connector_id: str, token_data: dict[str, Any], user_id: str = "default_user") -> None:
-        payload = json.dumps(token_data)
+        payload = _encode_token_payload(token_data)
         conn = self._connect()
         try:
             conn.execute(
@@ -264,10 +368,7 @@ class OAuthTokenStore:
                 (connector_id, user_id),
             ).fetchone()
             if row and row["credentials_ref"]:
-                try:
-                    return json.loads(row["credentials_ref"])
-                except json.JSONDecodeError:
-                    return None
+                return _decode_token_payload(row["credentials_ref"])
             return None
         finally:
             conn.close()
@@ -280,6 +381,45 @@ class OAuthTokenStore:
                 (connector_id, user_id),
             )
             conn.commit()
+        finally:
+            conn.close()
+
+    def encrypt_existing(self) -> int:
+        """Encrypt legacy plaintext OAuth rows after a key is configured."""
+        if not oauth_token_encryption_enabled():
+            return 0
+        conn = self._connect()
+        migrated = 0
+        try:
+            rows = conn.execute(
+                """
+                select connector_id, user_id, credentials_ref
+                from connector_connections
+                where auth_mode='oauth' and credentials_ref is not null
+                """
+            ).fetchall()
+            for row in rows:
+                payload = str(row["credentials_ref"])
+                if payload.startswith(_ENCRYPTED_TOKEN_PREFIX):
+                    continue
+                token_data = _decode_token_payload(payload)
+                if token_data is None:
+                    continue
+                conn.execute(
+                    """
+                    update connector_connections
+                    set credentials_ref=?
+                    where connector_id=? and user_id=?
+                    """,
+                    (
+                        _encode_token_payload(token_data),
+                        row["connector_id"],
+                        row["user_id"],
+                    ),
+                )
+                migrated += 1
+            conn.commit()
+            return migrated
         finally:
             conn.close()
 

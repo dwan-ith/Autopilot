@@ -5,12 +5,21 @@ import os
 import sqlite3
 import threading
 from contextlib import closing
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
-from autopilot.models import ApprovalStatus, AuthMode, ConnectorConnection, ConnectorStatus, Mission, MissionStatus, OperatorStep, Signal, utc_now
-
+from autopilot.models import (
+    ApprovalStatus,
+    AuthMode,
+    ConnectorConnection,
+    ConnectorStatus,
+    Mission,
+    MissionStatus,
+    OperatorStep,
+    Signal,
+    utc_now,
+)
 
 ROOT = Path(__file__).resolve().parents[2]
 DATA_DIR = ROOT / "data"
@@ -74,6 +83,8 @@ class Store:
         conn.row_factory = sqlite3.Row
         conn.execute("pragma busy_timeout=30000")
         conn.execute("pragma foreign_keys=on")
+        conn.execute("pragma journal_mode=wal")
+        conn.execute("pragma synchronous=normal")
         return conn
 
     def _maybe_checkpoint(self, conn: sqlite3.Connection) -> None:
@@ -212,21 +223,17 @@ class Store:
         with self._lock:
             existing = self.get_mission(mission.id)
             if existing:
-                seen_signals = {signal.id for signal in mission.signals}
-                mission.signals.extend(signal for signal in existing.signals if signal.id not in seen_signals)
-
-                seen_graph = {node.id for node in mission.graph}
-                mission.graph.extend(node for node in existing.graph if node.id not in seen_graph)
-
-                seen_policies = {decision.id for decision in mission.policy_decisions}
-                mission.policy_decisions.extend(
-                    decision for decision in existing.policy_decisions if decision.id not in seen_policies
+                mission.signals = self._merge_by_id(mission.signals, existing.signals)
+                mission.hypotheses = self._merge_by_id(mission.hypotheses, existing.hypotheses)
+                mission.evidence = self._merge_by_id(mission.evidence, existing.evidence)
+                mission.actions = self._merge_by_id(mission.actions, existing.actions)
+                mission.policy_decisions = self._merge_by_id(
+                    mission.policy_decisions, existing.policy_decisions
                 )
-
-                seen_approvals = {approval.id for approval in mission.approvals}
-                mission.approvals.extend(
-                    approval for approval in existing.approvals if approval.id not in seen_approvals
-                )
+                mission.approvals = self._merge_approvals(mission.approvals, existing.approvals)
+                mission.graph = self._merge_by_id(mission.graph, existing.graph)
+                mission.agent_runs = self._merge_by_id(mission.agent_runs, existing.agent_runs)
+                mission.memory_notes = list(dict.fromkeys(mission.memory_notes + existing.memory_notes))
             mission.updated_at = utc_now()
             with closing(self.connect()) as conn, conn:
                 conn.execute(
@@ -242,6 +249,27 @@ class Store:
             for signal in mission.signals:
                 self.save_signal(signal, mission.id)
             return
+
+    @staticmethod
+    def _merge_by_id(current: list[Any], persisted: list[Any]) -> list[Any]:
+        """Keep caller order while preserving records added by another writer."""
+        seen = {item.id for item in current}
+        return current + [item for item in persisted if item.id not in seen]
+
+    @staticmethod
+    def _merge_approvals(current: list[Any], persisted: list[Any]) -> list[Any]:
+        """Never overwrite a decided approval with an older pending snapshot."""
+        persisted_by_id = {item.id: item for item in persisted}
+        merged = []
+        seen: set[str] = set()
+        for item in current:
+            previous = persisted_by_id.get(item.id)
+            if previous and previous.decided_at and not item.decided_at:
+                item = previous
+            merged.append(item)
+            seen.add(item.id)
+        merged.extend(item for item in persisted if item.id not in seen)
+        return merged
 
     def _mission_row(self, mission: Mission) -> tuple[Any, ...]:
         return (
@@ -273,7 +301,7 @@ class Store:
 
     def count_traces(self) -> int:
         with self._lock, closing(self.connect()) as conn, conn:
-            row = conn.execute('SELECT COUNT(*) as count FROM traces').fetchone()
+            row = conn.execute('SELECT COUNT(*) as count FROM trace_events').fetchone()
         return row['count'] if row else 0
 
     def list_missions(self, limit: int = 50) -> list[dict[str, Any]]:
@@ -401,7 +429,7 @@ class Store:
         with self._lock, closing(self.connect()) as conn, conn:
             conn.execute(
                 "insert into memory_items (key, value, created_at) values (?, ?, ?)",
-                (key, value, datetime.now(timezone.utc).isoformat()),
+                (key, value, datetime.now(UTC).isoformat()),
             )
             self._prune_memory_locked(conn, key)
 

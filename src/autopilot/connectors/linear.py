@@ -14,7 +14,14 @@ from typing import Any
 import httpx
 
 from autopilot.connectors.base import Connector
-from autopilot.models import ActionResult, ActionRisk, Capability, ConnectorManifest, ConnectorToolSpec, Evidence
+from autopilot.models import (
+    ActionResult,
+    ActionRisk,
+    Capability,
+    ConnectorManifest,
+    ConnectorToolSpec,
+    Evidence,
+)
 
 LINEAR_GQL = "https://api.linear.app/graphql"
 
@@ -58,6 +65,9 @@ class LinearConnector(Connector):
         auth_required=True,
     )
 
+    def __init__(self) -> None:
+        self._last_live = False
+
     def _api_key(self) -> str | None:
         return os.getenv("LINEAR_API_KEY", "").strip() or None
 
@@ -76,10 +86,16 @@ class LinearConnector(Connector):
             "configured": bool(key),
             "action_ready": bool(key),
             "missing": [] if key else ["LINEAR_API_KEY"],
-            "mode": "api_key" if key else "missing_credentials",
-            "detail": "Linear API ready." if key else "Missing: LINEAR_API_KEY",
+            "mode": "api_key_live" if self._last_live else ("api_key_configured" if key else "missing_credentials"),
+            "detail": (
+                "Linear API access live-proven."
+                if self._last_live
+                else "Linear API key configured; run smoke proof."
+                if key
+                else "Missing: LINEAR_API_KEY"
+            ),
             "action": action,
-            "integration_live": bool(key),
+            "integration_live": self._last_live,
         }
 
     async def _gql(self, query: str, variables: dict | None = None) -> dict[str, Any]:
@@ -90,7 +106,21 @@ class LinearConnector(Connector):
                 json={"query": query, "variables": variables or {}},
             )
             resp.raise_for_status()
-            return resp.json()
+            payload = resp.json()
+            if not isinstance(payload, dict):
+                raise RuntimeError("Linear returned a non-object GraphQL response")
+            errors = payload.get("errors")
+            if errors:
+                messages = [
+                    str(item.get("message", "Unknown GraphQL error"))
+                    for item in errors
+                    if isinstance(item, dict)
+                ]
+                raise RuntimeError("Linear GraphQL error: " + "; ".join(messages or [str(errors)]))
+            if not isinstance(payload.get("data"), dict):
+                raise RuntimeError("Linear GraphQL response did not contain a data object")
+            self._last_live = True
+            return payload
 
     async def _resolve_team_id(self) -> str | None:
         """Get the first available team ID if LINEAR_TEAM_ID not set."""
@@ -109,7 +139,16 @@ class LinearConnector(Connector):
             return [Evidence(source="linear", title="Linear not configured", summary="Set LINEAR_API_KEY env var", confidence=0.0)]
         gql = """
         query SearchIssues($query: String!) {
-            issueSearch(query: $query, first: 8) {
+            issues(
+                first: 8
+                orderBy: updatedAt
+                filter: {
+                    or: [
+                        { title: { containsIgnoreCase: $query } }
+                        { description: { containsIgnoreCase: $query } }
+                    ]
+                }
+            ) {
                 nodes {
                     id
                     title
@@ -125,7 +164,7 @@ class LinearConnector(Connector):
         """
         try:
             data = await self._gql(gql, {"query": query})
-            nodes = data.get("data", {}).get("issueSearch", {}).get("nodes", [])
+            nodes = data["data"]["issues"].get("nodes", [])
             results = []
             for issue in nodes:
                 state = (issue.get("state") or {}).get("name", "Unknown")
@@ -196,7 +235,7 @@ class LinearConnector(Connector):
                 )
             errors = data.get("errors", [])
             return ActionResult(connector="linear", action="create_issue", status="failed", summary=f"Linear API error: {errors}")
-        except Exception as e:
+        except (httpx.RequestError, httpx.HTTPStatusError, KeyError, ValueError) as e:
             return ActionResult(connector="linear", action="create_issue", status="failed", summary=str(e))
 
     def as_tools(self):

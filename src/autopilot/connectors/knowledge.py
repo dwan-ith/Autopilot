@@ -7,7 +7,6 @@ import httpx
 from autopilot.connectors.base import Connector
 from autopilot.models import Capability, ConnectorManifest, ConnectorToolSpec, Evidence
 
-
 LOCAL_KNOWLEDGE = [
     {
         "title": "Export failure after rollout runbook",
@@ -97,7 +96,7 @@ class KnowledgeConnector(Connector):
                     json={"api_key": api_key, "query": query, "max_results": 3, "search_depth": "basic"},
                 )
                 response.raise_for_status()
-        except Exception as exc:
+        except (KeyError, ValueError, OSError) as exc:
             return [Evidence(
                 source=self.manifest.name,
                 title="Live web search unavailable",

@@ -14,8 +14,13 @@ from typing import Any
 import httpx
 
 from autopilot.connectors.base import Connector
-from autopilot.models import ActionResult, Capability, ConnectorManifest, ConnectorToolSpec, Evidence
-
+from autopilot.models import (
+    ActionResult,
+    Capability,
+    ConnectorManifest,
+    ConnectorToolSpec,
+    Evidence,
+)
 
 NOTION_API = "https://api.notion.com/v1"
 NOTION_VERSION = "2022-06-28"
@@ -163,7 +168,7 @@ class NotionConnector(Connector):
                     connector="notion", action="create_page", status="complete",
                     summary=f"Created page: {name}", artifact_path=data.get("url", ""),
                 )
-        except Exception as e:
+        except (httpx.RequestError, httpx.HTTPStatusError, KeyError, ValueError) as e:
             return ActionResult(connector="notion", action="create_page", status="failed", summary=str(e))
 
     async def action(self, name: str, payload: dict[str, Any]) -> ActionResult:
@@ -183,6 +188,12 @@ class NotionConnector(Connector):
                 description="Search Notion pages and databases for runbooks, incident records, or knowledge.",
                 parameters={"query": "Search query"},
                 fn=self.search,
-            )
+            ),
+            Tool(
+                name="notion_read_page",
+                description="Read the child block text of a Notion page.",
+                parameters={"ref": "Notion page or block id"},
+                fn=self.read,
+            ),
         ]
 

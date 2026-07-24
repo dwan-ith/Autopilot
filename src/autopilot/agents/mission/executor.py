@@ -16,11 +16,12 @@ Uses the Groq-2 slot (fast) — actions should execute without delay.
 from __future__ import annotations
 
 import logging
+from datetime import UTC
 from typing import Any
 
 from autopilot.agents.base import AgentResult, SubAgent
-from autopilot.connectors.base import Connector, ConnectorRegistry
-from autopilot.models import ActionApproval, ActionResult, Capability, Mission
+from autopilot.connectors.base import Connector
+from autopilot.models import Mission
 
 log = logging.getLogger("autopilot.agents.executor")
 
@@ -209,7 +210,7 @@ class ExecutorAgent:
         return brief or self._heuristic_brief(mission)
 
     def _heuristic_brief(self, mission: Mission) -> str:
-        from datetime import datetime, timezone
+        from datetime import datetime
         top = sorted(mission.hypotheses, key=lambda h: h.confidence, reverse=True)
         lead = top[0] if top else None
         rec = "Continue monitoring and record the investigation."
@@ -219,7 +220,7 @@ class ExecutorAgent:
             rec = "Escalate to the owning team with a customer-safe status update and evidence-backed next actions."
         return (
             f"# AUTOPILOT Mission Brief\n"
-            f"Generated: {datetime.now(timezone.utc).isoformat()}\n\n"
+            f"Generated: {datetime.now(UTC).isoformat()}\n\n"
             f"## Incident Summary\n{mission.summary}\n\n"
             f"## Root Cause Analysis\n"
             f"{lead.title if lead else 'Undetermined'}: {lead.rationale if lead else ''}\n\n"

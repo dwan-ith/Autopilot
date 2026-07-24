@@ -61,7 +61,7 @@ class ScopedAgent:
 
 
 class ProjectMgmtAgent(ScopedAgent):
-    """Linear-only project management agent; Jira is intentionally a config stub."""
+    """Project-management agent backed by the implemented Linear connector."""
 
     agent_name = "project_mgmt"
 

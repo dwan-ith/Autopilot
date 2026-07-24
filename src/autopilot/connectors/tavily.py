@@ -10,15 +10,13 @@ web-search-quality lookups, just at different depth tiers.
 
 from __future__ import annotations
 
+import json
 import os
-import urllib.parse
-from typing import Any
 
 import httpx
 
 from autopilot.connectors.base import Connector
 from autopilot.models import Capability, ConnectorManifest, ConnectorToolSpec, Evidence
-
 
 TAVILY_API = "https://api.tavily.com"
 DDG_API = "https://api.duckduckgo.com/"
@@ -207,7 +205,7 @@ class TavilyConnector(Connector):
                 )
                 resp.raise_for_status()
                 data = resp.json()
-        except Exception:
+        except (httpx.RequestError, httpx.HTTPStatusError, json.JSONDecodeError, KeyError, ValueError):
             return []
 
         results: list[Evidence] = []

@@ -12,15 +12,18 @@ Optional: GITHUB_REPO env var (default repo, e.g. "owner/repo")
 
 from __future__ import annotations
 
+import json
 import logging
 import os
 import re
+from pathlib import Path
 from typing import Any
 
 import httpx
 
 from autopilot.agents.base import Tool
 from autopilot.connectors.base import Connector
+from autopilot.connectors.oauth import get_valid_token, github_configured, is_authorized
 from autopilot.models import (
     ActionResult,
     ActionRisk,
@@ -30,9 +33,7 @@ from autopilot.models import (
     Evidence,
     Signal,
 )
-from autopilot.connectors.oauth import build_github_auth_url, get_valid_token, github_configured, is_authorized
 from autopilot.storage import DB_PATH
-from pathlib import Path
 
 log = logging.getLogger("autopilot.connectors.github")
 
@@ -142,10 +143,11 @@ class GitHubConnector(Connector):
             
         return {
             "configured": authorized,
-            "action_ready": authorized,
+            "read_ready": True,
+            "action_ready": authorized and (not write_action or bool(self._default_repo())),
             "missing": missing if missing else ([] if authorized else ["GitHub OAuth or GITHUB_TOKEN (optional — enables private repos + write actions)"]),
             "mode": mode,
-            "auth_url": build_github_auth_url(state="github") if is_oauth_configured and not is_oauth_authorized else None,
+            "auth_url": "/oauth/authorize/github" if is_oauth_configured and not is_oauth_authorized else None,
             "detail": detail,
             "action": action,
             "integration_live": authorized,
@@ -254,7 +256,7 @@ class GitHubConnector(Connector):
                         continue
                     log.error("GitHub search failed: %s", exc)
                     return []
-                except Exception as exc:
+                except (httpx.RequestError, httpx.HTTPStatusError, json.JSONDecodeError, KeyError) as exc:
                     log.error("GitHub search failed: %s", exc)
                     return []
 
@@ -362,7 +364,7 @@ class GitHubConnector(Connector):
                 resp = await client.get(url, headers=await self._headers())
                 resp.raise_for_status()
                 return resp.json()
-        except Exception as exc:
+        except (httpx.RequestError, httpx.HTTPStatusError, json.JSONDecodeError, KeyError) as exc:
             log.error("GitHub read failed for %s: %s", ref, exc)
             return {"error": str(exc)}
 

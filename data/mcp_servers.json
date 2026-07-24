@@ -1,0 +1,31 @@
+{
+  "mcpServers": {
+    "autopilot-native": {
+      "displayName": "Autopilot Native Tools",
+      "description": "Local MCP facade over Autopilot's real read-only connector tools.",
+      "enabled": true,
+      "transport": "stdio",
+      "command": "${PYTHON}",
+      "args": [
+        "-m",
+        "autopilot.mcp_server"
+      ],
+      "cwd": "${AUTOPILOT_ROOT}",
+      "env": {
+        "PYTHONPATH": "${AUTOPILOT_SRC}"
+      },
+      "timeoutSeconds": 30
+    },
+    "example-streamable-http": {
+      "displayName": "Example Remote MCP",
+      "description": "Disabled example showing the Streamable HTTP configuration shape.",
+      "enabled": false,
+      "transport": "streamable_http",
+      "url": "https://mcp.example.com/mcp",
+      "headers": {
+        "Authorization": "Bearer ${EXAMPLE_MCP_TOKEN}"
+      },
+      "timeoutSeconds": 20
+    }
+  }
+}

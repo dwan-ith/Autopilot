@@ -13,7 +13,7 @@ from __future__ import annotations
 import logging
 from typing import Any
 
-from autopilot.agents.base import AgentResult, PersistentAgent, SubAgent, Tool
+from autopilot.agents.base import AgentResult, PersistentAgent, SubAgent
 from autopilot.models import Mission, Signal
 
 log = logging.getLogger("autopilot.agents.correlator")

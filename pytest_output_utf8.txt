@@ -1,0 +1,26 @@
+﻿============================= test session starts =============================
+platform win32 -- Python 3.13.3, pytest-9.1.1, pluggy-1.6.0 -- C:\Users\aacer\Documents\Anvil\autopilot\venv\Scripts\python.exe
+cachedir: .pytest_cache
+rootdir: C:\Users\aacer\Documents\Anvil\autopilot
+configfile: pyproject.toml
+plugins: anyio-4.13.0, asyncio-1.4.0
+asyncio: mode=Mode.STRICT, debug=False, asyncio_default_fixture_loop_scope=None, asyncio_default_test_loop_scope=function
+collecting ... collected 6 items / 1 error
+
+=================================== ERRORS ====================================
+___________________ ERROR collecting tests/test_runtime.py ____________________
+tests\test_runtime.py:20: in <module>
+    import autopilot.api.main as api_main
+src\autopilot\api\__init__.py:1: in <module>
+    from autopilot.api.main import app
+src\autopilot\api\main.py:91: in <module>
+    store = Store()
+            ^^^^^^^
+src\autopilot\storage.py:75: in __init__
+    if self._write_count % self._wal_checkpoint_every == 0:
+       ^^^^^^^^^^^^^^^^^
+E   AttributeError: 'Store' object has no attribute '_write_count'
+=========================== short test summary info ===========================
+ERROR tests/test_runtime.py - AttributeError: 'Store' object has no attribute...
+!!!!!!!!!!!!!!!!!!! Interrupted: 1 error during collection !!!!!!!!!!!!!!!!!!!!
+============================== 1 error in 1.70s ===============================

@@ -49,7 +49,7 @@ class PolicyEngine:
                 connector=connector.manifest.name,
                 action=action,
                 allowed=False,
-                reason="High-risk actions require explicit human approval in this demo policy.",
+                reason="High-risk actions require explicit human approval.",
                 risk=risk,
                 requires_validation=True,
                 confidence_required=required,
@@ -75,7 +75,7 @@ class PolicyEngine:
                 allowed=False,
                 reason=(
                     "Action passed confidence policy but requires human approval. "
-                    "Set AUTOPILOT_AUTO_APPROVE_ACTIONS=1 only for trusted demos."
+                    "Set AUTOPILOT_AUTO_APPROVE_ACTIONS=1 only in a trusted, controlled environment."
                 ),
                 risk=risk,
                 requires_validation=True,

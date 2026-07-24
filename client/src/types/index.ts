@@ -104,6 +104,7 @@ export interface Mission {
   approvals: ActionApproval[];
   graph: MissionGraphNode[];
   agent_runs: AgentRun[];
+  counts?: Record<string, number>;
 }
 
 export interface Trace {
@@ -224,7 +225,9 @@ export interface ProviderSlotHealth {
 export interface ProviderHealth {
   disabled: boolean;
   provider: string;
+  active_provider?: string;
   configured_slots: number;
+  total_slots?: number;
   active_slots: number;
   quarantined_slots: number;
   slots: ProviderSlotHealth[];
@@ -245,4 +248,32 @@ export interface TracingStatus {
   last_sdk_event_at?: string | null;
   proof_mode: string;
   local_trace_events?: number;
+}
+
+export interface MCPClientConfig {
+  server_name: string;
+  transport: "streamable_http";
+  endpoint: string;
+  auth_required: boolean;
+  api_key_env?: string | null;
+  public_https_ready: boolean;
+  codex: {
+    config_toml: string;
+    stdio_command: string[];
+  };
+  claude: {
+    mcp_json: {
+      mcpServers: Record<string, {
+        type: string;
+        url: string;
+        headers?: Record<string, string>;
+      }>;
+    };
+  };
+  perplexity: {
+    server_url: string;
+    transport: string;
+    authentication: string;
+    requires_public_https: boolean;
+  };
 }

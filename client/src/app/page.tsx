@@ -4,6 +4,7 @@ import { useCallback, useEffect, useMemo, useState } from "react";
 import type { ElementType } from "react";
 import {
   Activity,
+  AlertTriangle,
   ArrowRight,
   BarChart3,
   Bot,
@@ -11,6 +12,7 @@ import {
   ChevronDown,
   ChevronUp,
   Command,
+  Copy,
   Database,
   FileText,
   Filter,
@@ -19,7 +21,9 @@ import {
   LayoutDashboard,
   Lock,
   Puzzle,
+  RefreshCw,
   ShieldCheck,
+  Square,
   Terminal,
   Wrench,
   X,
@@ -37,8 +41,9 @@ import {
   ConnectorDirectoryItem,
   Mission,
   MissionGraphNode,
+  MCPClientConfig,
   ProviderHealth,
-  TracingStatus,
+  ProviderSlotHealth,
 } from "@/types";
 
 const API_BASE = process.env.NEXT_PUBLIC_API_URL || "";
@@ -54,32 +59,56 @@ const CATALOG_RUNTIME_ALIASES: Record<string, string> = {
 
 type View = "dashboard" | "connectors" | "approvals" | "traces" | "analytics";
 
+function useClock(intervalMs: number = 60_000) {
+  const [now, setNow] = useState(0);
+  useEffect(() => {
+    const tick = () => setNow(Date.now());
+    const initial = window.setTimeout(tick, 0);
+    const interval = window.setInterval(tick, intervalMs);
+    return () => {
+      window.clearTimeout(initial);
+      window.clearInterval(interval);
+    };
+  }, [intervalMs]);
+  return now;
+}
+
+function isMissionStuck(mission: Mission, now: number) {
+  return now > 0 &&
+    ["running", "queued", "waiting"].includes(mission.status) &&
+    new Date(mission.updated_at).getTime() < now - 15 * 60 * 1000;
+}
+
 function BackgroundGrid() {
   return (
     <div className="fixed inset-0 -z-10 overflow-hidden pointer-events-none">
-      <div className="absolute inset-0 bg-[#030303]" />
-      <div 
+      <div
+        className="absolute inset-0 bg-cover bg-center bg-no-repeat"
+        style={{ backgroundImage: `url('/background.png')` }}
+      />
+      <div className="absolute inset-0 bg-black/40" />
+      <div
         className="absolute inset-0 opacity-[0.15]"
         style={{
           backgroundImage: `radial-gradient(circle at 2px 2px, rgba(255,255,255,0.15) 1px, transparent 0)`,
           backgroundSize: '32px 32px'
         }}
       />
-      <motion.div 
-        animate={{ 
+      <motion.div
+        animate={{
           scale: [1, 1.2, 1],
           opacity: [0.3, 0.5, 0.3],
         }}
         transition={{ duration: 10, repeat: Infinity, ease: "linear" }}
-        className="absolute -top-[20%] -left-[10%] w-[70%] h-[70%] rounded-full bg-blue-500/10 blur-[120px]" 
+        className="absolute -top-[20%] -left-[10%] w-[70%] h-[70%] rounded-full bg-blue-500/10 blur-[120px]"
       />
-      <motion.div 
-        animate={{ 
+      <motion.div
+        animate={{
           scale: [1.2, 1, 1.2],
           opacity: [0.2, 0.4, 0.2],
         }}
         transition={{ duration: 15, repeat: Infinity, ease: "linear" }}
-        className="absolute -bottom-[20%] -right-[10%] w-[60%] h-[60%] rounded-full bg-purple-500/10 blur-[120px]" 
+        className="absolute -bottom-[20%] -right-[10%] w-[60%] h-[60%] rounded-full bg-purple-500/10 blur-[120px]"
       />
     </div>
   );
@@ -88,15 +117,19 @@ function BackgroundGrid() {
 export default function Dashboard() {
   const {
     missions,
+    missionDetails,
     traces,
     connectors,
     connectorDirectory,
+    mcpClientConfig,
     providerHealth,
-    tracingStatus,
     approvals,
     provider,
     connection,
     monitorConnectedServices,
+    loadMissionDetails,
+    cleanupStuckMissions,
+    cancelMission,
     sendSignal,
     connectConnector,
     disconnectConnector,
@@ -109,11 +142,17 @@ export default function Dashboard() {
   const [currentView, setCurrentView] = useState<View>("dashboard");
   const [isMonitoring, setIsMonitoring] = useState(false);
   const [isSignalModalOpen, setIsSignalModalOpen] = useState(false);
+  const [isHealthModalOpen, setIsHealthModalOpen] = useState(false);
+  const [cleanupResult, setCleanupResult] = useState<{ cleaned: number } | null>(null);
+  const now = useClock();
 
-  const selectedMission = useMemo(
+  const selectedMissionSummary = useMemo(
     () => missions.find((m) => m.id === selectedId) || missions[0],
     [missions, selectedId],
   );
+  const selectedMission = selectedMissionSummary
+    ? missionDetails[selectedMissionSummary.id] || selectedMissionSummary
+    : undefined;
   const runtimeConnectorByKey = useMemo(() => {
     const m = new Map<string, Connector>();
     for (const c of connectors) {
@@ -145,16 +184,17 @@ export default function Dashboard() {
   }, [currentView, refresh]);
 
   useEffect(() => {
-    if (currentView !== "connectors") return;
-    const onVis = () => {
-      if (document.visibilityState === "visible") void refresh();
-    };
-    document.addEventListener("visibilitychange", onVis);
-    return () => document.removeEventListener("visibilitychange", onVis);
-  }, [currentView, refresh]);
+    if (!selectedMissionSummary) return;
+    const details = missionDetails[selectedMissionSummary.id];
+    if (!details || details.updated_at !== selectedMissionSummary.updated_at) {
+      void loadMissionDetails(selectedMissionSummary.id);
+    }
+  }, [loadMissionDetails, missionDetails, selectedMissionSummary]);
 
   const runningCount = missions.filter((m) => m.status === "running").length;
+  const stuckCount = missions.filter((mission) => isMissionStuck(mission, now)).length;
   const backendOffline = connection.status === "offline";
+  const issueCount = (providerHealth?.quarantined_slots ?? 0) + (connection.status === "offline" ? 1 : 0) + stuckCount;
 
   const handleMonitorConnectedServices = async () => {
     setIsMonitoring(true);
@@ -163,6 +203,12 @@ export default function Dashboard() {
     } finally {
       setIsMonitoring(false);
     }
+  };
+
+  const handleCleanupStuck = async () => {
+    const result = await cleanupStuckMissions();
+    if (result) setCleanupResult(result);
+    setTimeout(() => setCleanupResult(null), 4000);
   };
 
   return (
@@ -175,8 +221,25 @@ export default function Dashboard() {
             <Command className="h-3.5 w-3.5" />
           </div>
           <span className="font-bold tracking-tight text-[14px]">AUTOPILOT</span>
+          {/* Connection status pill */}
+          <div className={cn(
+            "ml-auto flex items-center gap-1 rounded-full px-2 py-0.5 text-[9px] font-black uppercase tracking-wider",
+            connection.status === "connected" ? "bg-emerald-500/10 text-emerald-500" :
+              connection.status === "degraded" ? "bg-amber-500/10 text-amber-500" :
+                connection.status === "checking" ? "bg-blue-500/10 text-blue-400" :
+                  "bg-red-500/10 text-red-500"
+          )}>
+            <span className={cn("h-1.5 w-1.5 rounded-full",
+              connection.status === "connected" ? "bg-emerald-500 animate-pulse" :
+                connection.status === "degraded" ? "bg-amber-500" :
+                  connection.status === "checking" ? "bg-blue-400 animate-pulse" :
+                    "bg-red-500"
+            )} />
+            {connection.status === "connected" ? "LIVE" :
+              connection.status === "degraded" ? "SYNC" :
+                connection.status === "checking" ? "…" : "OFF"}
+          </div>
         </div>
-
 
         <nav className="flex-1 space-y-1 p-3">
           <NavItem
@@ -191,7 +254,7 @@ export default function Dashboard() {
             label="Connectors"
             active={currentView === "connectors"}
             onClick={() => setCurrentView("connectors")}
-            count={connectors.length}
+            count={connectorDirectory.filter(c => c.status === "connected").length}
           />
           <NavItem
             icon={ShieldCheck}
@@ -199,6 +262,7 @@ export default function Dashboard() {
             active={currentView === "approvals"}
             onClick={() => setCurrentView("approvals")}
             count={totals.approvals || approvals.length}
+            urgent={approvals.length > 0}
           />
           <NavItem
             icon={Activity}
@@ -215,16 +279,49 @@ export default function Dashboard() {
           />
         </nav>
 
-        <div className="border-t border-border/50 p-4">
-          <div className="flex items-center gap-3 rounded-lg bg-secondary/50 p-3">
-            <div className="flex h-8 w-8 items-center justify-center rounded-full bg-background border border-border/50 text-muted-foreground">
+        <div className="border-t border-border/50 p-4 space-y-2">
+          {/* Stuck missions warning */}
+          {stuckCount > 0 && (
+            <button
+              onClick={handleCleanupStuck}
+              className="flex w-full items-center justify-between rounded-lg bg-amber-500/10 border border-amber-500/20 px-3 py-2 text-[11px] font-bold text-amber-400 hover:bg-amber-500/20 transition-colors"
+            >
+              <span className="flex items-center gap-1.5">
+                <AlertTriangle className="h-3 w-3" />
+                {stuckCount} stuck mission{stuckCount > 1 ? "s" : ""}
+              </span>
+              <span className="text-[9px] uppercase tracking-wider opacity-70">Clean up</span>
+            </button>
+          )}
+          {cleanupResult && (
+            <div className="rounded-lg bg-emerald-500/10 border border-emerald-500/20 px-3 py-1.5 text-[10px] font-bold text-emerald-400">
+              ✓ Cleaned {cleanupResult.cleaned} mission{cleanupResult.cleaned !== 1 ? "s" : ""}
+            </div>
+          )}
+          {/* Provider health */}
+          <button
+            onClick={() => setIsHealthModalOpen(true)}
+            className={cn(
+              "flex w-full items-center gap-3 rounded-lg p-3 transition-all",
+              issueCount > 0 ? "bg-amber-500/5 border border-amber-500/20 hover:bg-amber-500/10" : "bg-secondary/50 hover:bg-secondary/70"
+            )}
+          >
+            <div className={cn(
+              "flex h-8 w-8 flex-shrink-0 items-center justify-center rounded-full border",
+              issueCount > 0 ? "bg-amber-500/10 border-amber-500/30 text-amber-400" : "bg-background border-border/50 text-muted-foreground"
+            )}>
               <Bot className="h-4 w-4" />
             </div>
-            <div className="min-w-0">
+            <div className="min-w-0 flex-1 text-left">
               <p className="text-[11px] text-muted-foreground">Runtime Provider</p>
-              <p className="truncate text-[12px] font-semibold">{provider === "heuristic" ? "Heuristic fallback" : provider}</p>
+              <p className="truncate text-[12px] font-semibold">{provider === "heuristic" ? "Heuristic fallback" : (provider || "No LLM")}</p>
             </div>
-          </div>
+            {issueCount > 0 && (
+              <span className="flex-shrink-0 rounded-full bg-amber-500/20 px-1.5 py-0.5 text-[9px] font-black text-amber-400">
+                {issueCount}
+              </span>
+            )}
+          </button>
         </div>
       </aside>
 
@@ -232,20 +329,35 @@ export default function Dashboard() {
       <main className="flex flex-1 flex-col overflow-hidden bg-background/50">
         <header className="flex h-14 items-center justify-between border-b border-border/50 px-6 backdrop-blur-md">
           <div className="flex items-center gap-4">
-            <h2 className="text-[14px] font-bold capitalize">{currentView}</h2>
+            <h2 className="text-[14px] font-bold capitalize">
+              {currentView === "dashboard" ? "Missions" : currentView === "traces" ? "System Trace" : currentView}
+            </h2>
             {runningCount > 0 && (
               <span className="flex items-center gap-1.5 rounded-full bg-amber-500/10 px-2 py-0.5 text-[10px] font-bold text-amber-500 ring-1 ring-amber-500/20">
                 <span className="h-1 w-1 animate-pulse rounded-full bg-amber-500" />
                 {runningCount} ACTIVE
               </span>
             )}
+            {connection.status === "offline" && (
+              <span className="flex items-center gap-1.5 rounded-full bg-red-500/10 px-2 py-0.5 text-[10px] font-bold text-red-400 ring-1 ring-red-500/20">
+                BACKEND OFFLINE
+              </span>
+            )}
           </div>
 
           <div className="flex items-center gap-3">
             <button
+              onClick={() => void refresh()}
+              disabled={backendOffline}
+              title="Refresh data"
+              className="flex items-center justify-center rounded-md border border-border/50 h-[30px] w-[30px] text-muted-foreground hover:bg-white/[0.05] hover:text-foreground transition-colors"
+            >
+              <RefreshCw className="h-3.5 w-3.5" />
+            </button>
+            <button
               onClick={() => setIsSignalModalOpen(true)}
               disabled={backendOffline}
-              className="flex items-center gap-2 rounded-md border border-border/50 px-3 py-1.5 text-[12px] font-bold hover:bg-white/[0.05] transition-colors"
+              className="flex items-center gap-2 rounded-md border border-border/50 px-3 py-1.5 text-[12px] font-bold hover:bg-white/[0.05] transition-colors disabled:opacity-50"
             >
               <Zap className="h-3.5 w-3.5 text-primary" />
               Manual Signal
@@ -260,24 +372,12 @@ export default function Dashboard() {
             >
               <AnimatePresence mode="wait">
                 {isMonitoring ? (
-                  <motion.div
-                    key="loading"
-                    initial={{ y: 20 }}
-                    animate={{ y: 0 }}
-                    exit={{ y: -20 }}
-                    className="flex items-center gap-2"
-                  >
+                  <motion.div key="loading" initial={{ y: 20 }} animate={{ y: 0 }} exit={{ y: -20 }} className="flex items-center gap-2">
                     <Activity className="h-3.5 w-3.5 animate-spin" />
                     Checking...
                   </motion.div>
                 ) : (
-                  <motion.div
-                    key="idle"
-                    initial={{ y: 20 }}
-                    animate={{ y: 0 }}
-                    exit={{ y: -20 }}
-                    className="flex items-center gap-2"
-                  >
+                  <motion.div key="idle" initial={{ y: 20 }} animate={{ y: 0 }} exit={{ y: -20 }} className="flex items-center gap-2">
                     <Activity className="h-3.5 w-3.5" />
                     Check Services
                   </motion.div>
@@ -308,6 +408,7 @@ export default function Dashboard() {
                       <MissionCard
                         key={m.id}
                         mission={m}
+                        now={now}
                         active={selectedMission?.id === m.id}
                         onClick={() => setSelectedId(m.id)}
                       />
@@ -318,7 +419,7 @@ export default function Dashboard() {
                 {/* Mission Details */}
                 <div className="flex-1 overflow-y-auto p-8">
                   {selectedMission ? (
-                    <MissionDetail mission={selectedMission} />
+                    <MissionDetail mission={selectedMission} now={now} onCancel={cancelMission} />
                   ) : (
                     <div className="flex h-full flex-col items-center justify-center text-muted-foreground">
                       <Layers className="mb-4 h-12 w-12 opacity-10" />
@@ -343,6 +444,7 @@ export default function Dashboard() {
                     Manage your service connections and capability permissions.
                   </p>
                 </div>
+                {mcpClientConfig && <MCPClientPanel config={mcpClientConfig} />}
                 <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
                   {connectorDirectory.map((c) => (
                     <ConnectorCard
@@ -450,6 +552,16 @@ export default function Dashboard() {
             console.error("Failed to send signal:", error);
           }
         }}
+      />
+
+      {/* Provider Health Modal */}
+      <ProviderHealthModal
+        isOpen={isHealthModalOpen}
+        onClose={() => setIsHealthModalOpen(false)}
+        health={providerHealth}
+        connection={connection}
+        stuckCount={stuckCount}
+        onCleanup={handleCleanupStuck}
       />
     </div>
   );
@@ -559,7 +671,7 @@ function SignalModal({ isOpen, onClose, onSubmit }: { isOpen: boolean; onClose: 
         <div className="mb-8 flex items-center justify-between relative">
           <div>
             <h3 className="text-xl font-bold tracking-tight">Ingest Manual Signal</h3>
-            <p className="text-[12px] text-muted-foreground mt-1">Simulate an external event to trigger an autonomous mission.</p>
+            <p className="text-[12px] text-muted-foreground mt-1">Submit an operational signal to the autonomous runtime.</p>
           </div>
           <button onClick={onClose} className="rounded-full h-8 w-8 flex items-center justify-center hover:bg-white/5 text-muted-foreground transition-colors">
             <X className="h-5 w-5" />
@@ -584,7 +696,7 @@ function SignalModal({ isOpen, onClose, onSubmit }: { isOpen: boolean; onClose: 
           </div>
 
           <div className="grid grid-cols-2 gap-4">
-             <div className="space-y-2">
+            <div className="space-y-2">
               <label className="text-[10px] font-black uppercase tracking-[0.2em] text-muted-foreground/40">Type</label>
               <div className="relative">
                 <select
@@ -636,7 +748,7 @@ function SignalModal({ isOpen, onClose, onSubmit }: { isOpen: boolean; onClose: 
           <div className="space-y-2">
             <label className="text-[10px] font-black uppercase tracking-[0.2em] text-muted-foreground/40">Involved Entities (Comma separated)</label>
             <div className="relative">
-               <input
+              <input
                 value={entities}
                 onChange={(e) => setEntities(e.target.value)}
                 placeholder="checkout-service, acme-corp, v1.2.0"
@@ -669,7 +781,7 @@ function SignalModal({ isOpen, onClose, onSubmit }: { isOpen: boolean; onClose: 
 
 
 
-function NavItem({ icon: Icon, label, active, onClick, count }: { icon: ElementType; label: string; active: boolean; onClick: () => void; count?: number }) {
+function NavItem({ icon: Icon, label, active, onClick, count, urgent }: { icon: ElementType; label: string; active: boolean; onClick: () => void; count?: number; urgent?: boolean }) {
   return (
     <button
       onClick={onClick}
@@ -680,8 +792,12 @@ function NavItem({ icon: Icon, label, active, onClick, count }: { icon: ElementT
     >
       <Icon className="h-4 w-4" />
       <span className="flex-1 font-semibold">{label}</span>
-      {count !== undefined && (
-        <span className={cn("text-[10px] font-bold tabular-nums", active ? "text-primary-foreground/70" : "text-muted-foreground/40")}>
+      {count !== undefined && count > 0 && (
+        <span className={cn(
+          "text-[10px] font-bold tabular-nums px-1.5 py-0.5 rounded-full",
+          active ? "text-primary-foreground/70" :
+            urgent ? "bg-amber-500/20 text-amber-400" : "text-muted-foreground/40"
+        )}>
           {count}
         </span>
       )}
@@ -689,17 +805,19 @@ function NavItem({ icon: Icon, label, active, onClick, count }: { icon: ElementT
   );
 }
 
-function MissionCard({ mission, active, onClick }: { mission: Mission; active: boolean; onClick: () => void }) {
+function MissionCard({ mission, now, active, onClick }: { mission: Mission; now: number; active: boolean; onClick: () => void }) {
   const isHigh = ["high", "critical", "p0"].includes(mission.severity.toLowerCase());
-  
+  const isStuck = isMissionStuck(mission, now);
+
   return (
     <button
       onClick={onClick}
       className={cn(
         "group w-full rounded-lg border p-3.5 text-left transition-all duration-200",
-        active 
-          ? "border-primary/50 bg-primary/5 ring-1 ring-primary/20" 
-          : "border-transparent hover:border-border/50 hover:bg-white/[0.02]"
+        active
+          ? "border-primary/50 bg-primary/5 ring-1 ring-primary/20"
+          : "border-transparent hover:border-border/50 hover:bg-white/[0.02]",
+        isStuck && "border-amber-500/20"
       )}
     >
       <div className="mb-2 flex items-start justify-between gap-2">
@@ -709,10 +827,15 @@ function MissionCard({ mission, active, onClick }: { mission: Mission; active: b
         )}>
           {mission.title}
         </span>
-        <div className={cn(
-          "h-1.5 w-1.5 rounded-full flex-shrink-0 mt-1",
-          mission.status === "complete" ? "bg-emerald-500" : mission.status === "failed" ? "bg-red-500" : "bg-amber-500"
-        )} />
+        <div className="flex flex-col items-end gap-1 flex-shrink-0">
+          <div className={cn(
+            "h-1.5 w-1.5 rounded-full mt-1",
+            mission.status === "complete" ? "bg-emerald-500" :
+              mission.status === "failed" ? "bg-red-500" :
+                isStuck ? "bg-amber-500" : "bg-amber-500 animate-pulse"
+          )} />
+          {isStuck && <span className="text-[8px] font-black text-amber-500/70 uppercase">STUCK</span>}
+        </div>
       </div>
       <div className="flex items-center gap-3 text-[11px] text-muted-foreground/60">
         <span className={cn(
@@ -729,7 +852,16 @@ function MissionCard({ mission, active, onClick }: { mission: Mission; active: b
   );
 }
 
-function MissionDetail({ mission }: { mission: Mission }) {
+function MissionDetail({ mission, now, onCancel }: { mission: Mission; now: number; onCancel?: (id: string) => void }) {
+  const isStuck = isMissionStuck(mission, now);
+  const [canceling, setCanceling] = useState(false);
+
+  const handleCancel = async () => {
+    if (!onCancel || canceling) return;
+    setCanceling(true);
+    try { await onCancel(mission.id); } finally { setCanceling(false); }
+  };
+
   return (
     <div className="max-w-4xl mx-auto space-y-12">
       {/* Detail Header */}
@@ -744,15 +876,29 @@ function MissionDetail({ mission }: { mission: Mission }) {
             </div>
             <h1 className="text-3xl font-extrabold tracking-tight leading-tight">{mission.title}</h1>
           </div>
-          <div className={cn(
-            "rounded-lg border px-4 py-2 text-center",
-            mission.status === "complete" ? "border-emerald-500/20 bg-emerald-500/5 text-emerald-500" : "border-amber-500/20 bg-amber-500/5 text-amber-500"
-          )}>
-            <div className="text-[10px] font-black uppercase tracking-tighter opacity-60">Status</div>
-            <div className="text-[14px] font-black uppercase">{mission.status}</div>
+          <div className="flex items-center gap-3">
+            {isStuck && onCancel && (
+              <button
+                onClick={handleCancel}
+                disabled={canceling}
+                className="flex items-center gap-1.5 rounded-lg border border-red-500/30 bg-red-500/5 px-3 py-1.5 text-[11px] font-bold text-red-400 hover:bg-red-500/10 transition-colors disabled:opacity-50"
+              >
+                <Square className="h-3 w-3 fill-current" />
+                {canceling ? "Canceling..." : "Cancel"}
+              </button>
+            )}
+            <div className={cn(
+              "rounded-lg border px-4 py-2 text-center",
+              mission.status === "complete" ? "border-emerald-500/20 bg-emerald-500/5 text-emerald-500" :
+                mission.status === "failed" ? "border-red-500/20 bg-red-500/5 text-red-500" :
+                  isStuck ? "border-amber-500/20 bg-amber-500/5 text-amber-400" :
+                    "border-amber-500/20 bg-amber-500/5 text-amber-500"
+            )}>
+              <div className="text-[10px] font-black uppercase tracking-tighter opacity-60">Status</div>
+              <div className="text-[14px] font-black uppercase">{isStuck ? "STUCK" : mission.status}</div>
+            </div>
           </div>
         </div>
-        
         <p className="text-[16px] leading-relaxed text-muted-foreground/80 font-medium">
           {mission.summary || "No summary provided for this mission."}
         </p>
@@ -864,7 +1010,7 @@ function AgentCard({ run }: { run: AgentRun }) {
           {run.status}
         </span>
       </div>
-      
+
       <p className="text-[12px] leading-relaxed text-muted-foreground/60">{run.output_summary}</p>
 
       <div className="flex items-center justify-between">
@@ -878,7 +1024,7 @@ function AgentCard({ run }: { run: AgentRun }) {
         </div>
 
         {steps && steps.length > 0 && (
-          <button 
+          <button
             onClick={() => setShowTrace(!showTrace)}
             className="flex items-center gap-1 text-[10px] font-bold uppercase tracking-widest text-primary/60 hover:text-primary transition-colors"
           >
@@ -946,6 +1092,88 @@ function AgentCard({ run }: { run: AgentRun }) {
 }
 
 /** Normalize catalog auth_mode from JSON (string or rare enum-shaped object). */
+function MCPClientPanel({ config }: { config: MCPClientConfig }) {
+  const [copied, setCopied] = useState<string | null>(null);
+
+  const copy = async (label: string, value: string) => {
+    await navigator.clipboard.writeText(value);
+    setCopied(label);
+    window.setTimeout(() => setCopied((current) => current === label ? null : current), 1800);
+  };
+
+  const claudeJson = JSON.stringify(config.claude.mcp_json, null, 2);
+
+  return (
+    <section className="mb-8 border-y border-border/50 py-5">
+      <div className="flex flex-col gap-4 lg:flex-row lg:items-start lg:justify-between">
+        <div>
+          <div className="flex items-center gap-2">
+            <Terminal className="h-4 w-4 text-cyan-400" />
+            <h2 className="text-[14px] font-semibold">External MCP access</h2>
+            <span className="rounded border border-emerald-500/30 bg-emerald-500/10 px-1.5 py-0.5 text-[10px] font-medium text-emerald-300">
+              HTTP live
+            </span>
+          </div>
+          <div className="mt-2 flex max-w-full items-center gap-2">
+            <code className="min-w-0 overflow-hidden text-ellipsis whitespace-nowrap text-[12px] text-muted-foreground">
+              {config.endpoint}
+            </code>
+            <button
+              type="button"
+              title="Copy MCP endpoint"
+              aria-label="Copy MCP endpoint"
+              onClick={() => void copy("endpoint", config.endpoint)}
+              className="flex h-7 w-7 shrink-0 items-center justify-center rounded border border-border/60 text-muted-foreground transition-colors hover:bg-white/5 hover:text-foreground"
+            >
+              {copied === "endpoint" ? <CheckCircle2 className="h-3.5 w-3.5" /> : <Copy className="h-3.5 w-3.5" />}
+            </button>
+          </div>
+        </div>
+        <div className="flex flex-wrap gap-2 text-[11px]">
+          <span className="rounded border border-border/60 px-2 py-1">Codex ready</span>
+          <span className="rounded border border-border/60 px-2 py-1">Claude ready</span>
+          <span className={cn(
+            "rounded border px-2 py-1",
+            config.public_https_ready
+              ? "border-emerald-500/30 text-emerald-300"
+              : "border-amber-500/30 text-amber-300",
+          )}>
+            Perplexity {config.public_https_ready ? "ready" : "needs public HTTPS"}
+          </span>
+          <span className="rounded border border-border/60 px-2 py-1">
+            {config.auth_required ? "API key protected" : "Local open access"}
+          </span>
+        </div>
+      </div>
+
+      <div className="mt-4 grid grid-cols-1 gap-3 lg:grid-cols-2">
+        {[
+          { label: "Codex config.toml", value: config.codex.config_toml },
+          { label: "Claude .mcp.json", value: claudeJson },
+        ].map((item) => (
+          <div key={item.label} className="min-w-0 border border-border/40 bg-black/20 p-3">
+            <div className="mb-2 flex items-center justify-between">
+              <span className="text-[11px] font-medium text-muted-foreground">{item.label}</span>
+              <button
+                type="button"
+                title={`Copy ${item.label}`}
+                aria-label={`Copy ${item.label}`}
+                onClick={() => void copy(item.label, item.value)}
+                className="flex h-7 w-7 items-center justify-center rounded text-muted-foreground transition-colors hover:bg-white/5 hover:text-foreground"
+              >
+                {copied === item.label ? <CheckCircle2 className="h-3.5 w-3.5" /> : <Copy className="h-3.5 w-3.5" />}
+              </button>
+            </div>
+            <pre className="max-h-32 overflow-auto whitespace-pre-wrap break-all text-[10px] leading-5 text-cyan-100/80">
+              {item.value}
+            </pre>
+          </div>
+        ))}
+      </div>
+    </section>
+  );
+}
+
 function catalogAuthMode(c: ConnectorDirectoryItem): string {
   const raw = c.auth_mode as unknown;
   if (typeof raw === "string") return raw;
@@ -975,10 +1203,10 @@ const READINESS_NON_LIVE_MODES = new Set([
 function integrationLiveFromReadiness(
   readiness?:
     | (Record<string, unknown> & {
-        configured?: boolean;
-        mode?: string;
-        integration_live?: boolean;
-      })
+      configured?: boolean;
+      mode?: string;
+      integration_live?: boolean;
+    })
     | undefined,
 ): boolean {
   if (!readiness) return false;
@@ -996,22 +1224,23 @@ function ConnectorCard({
 }: {
   connector: ConnectorDirectoryItem;
   runtimeConnector?: Connector;
-  onConnect: (connectorId: string) => Promise<void>;
+  onConnect: (connectorId: string, authMode?: string) => Promise<void>;
   onDisconnect: (connectorId: string) => Promise<void>;
 }) {
   const [busy, setBusy] = useState(false);
   const connected = connector.status === "connected";
   const authMode = catalogAuthMode(connector);
   const canDemoConnect = connector.demo_available || authMode === "none";
+  const isMcpConnector = authMode === "mcp";
   const readiness = runtimeConnector?.readiness as
     | (Record<string, unknown> & {
-        configured?: boolean;
-        detail?: string;
-        mode?: string;
-        missing?: string[];
-        auth_url?: string;
-        integration_live?: boolean;
-      })
+      configured?: boolean;
+      detail?: string;
+      mode?: string;
+      missing?: string[];
+      auth_url?: string;
+      integration_live?: boolean;
+    })
     | undefined;
   const oauthUrl = readiness?.auth_url as string | undefined;
   const oauthGateActive = Boolean(oauthUrl);
@@ -1045,8 +1274,11 @@ function ConnectorCard({
     try {
       if (connected || trulyConnected) {
         await onDisconnect(connector.id);
-      } else if (canDemoConnect) {
-        await onConnect(connector.id);
+      } else if (canDemoConnect || (isMcpConnector && readiness?.configured)) {
+        await onConnect(
+          connector.id,
+          authMode === "none" ? "none" : isMcpConnector ? "mcp" : "demo",
+        );
       }
     } finally {
       setBusy(false);
@@ -1077,7 +1309,7 @@ function ConnectorCard({
             )} />
           )}
         </div>
-        
+
         <div className="flex flex-col items-end gap-2">
           <div className={cn(
             "flex items-center gap-1.5 rounded-full px-3 py-1 text-[10px] font-black uppercase tracking-tighter ring-1 ring-inset shadow-sm",
@@ -1085,27 +1317,27 @@ function ConnectorCard({
               ? "bg-emerald-500/10 text-emerald-500 ring-emerald-500/20"
               : showDemoBadge
                 ? "bg-amber-500/10 text-amber-500 ring-amber-500/20"
-              : readiness
-                ? "bg-amber-500/10 text-amber-500 ring-amber-500/20"
-                : connector.implemented
-                  ? "bg-blue-500/10 text-blue-500 ring-blue-500/20"
-                  : "bg-white/5 text-muted-foreground ring-white/10"
+                : readiness
+                  ? "bg-amber-500/10 text-amber-500 ring-amber-500/20"
+                  : connector.implemented
+                    ? "bg-blue-500/10 text-blue-500 ring-blue-500/20"
+                    : "bg-white/5 text-muted-foreground ring-white/10"
           )}>
             <div className={cn("h-1.5 w-1.5 rounded-full",
               showConnectedBadge ? "bg-emerald-500 animate-pulse"
-              : showDemoBadge ? "bg-amber-500 animate-pulse"
-              : readiness ? "bg-amber-500"
-              : "bg-current opacity-40"
+                : showDemoBadge ? "bg-amber-500 animate-pulse"
+                  : readiness ? "bg-amber-500"
+                    : "bg-current opacity-40"
             )} />
             {showConnectedBadge
               ? "CONNECTED"
               : showDemoBadge
                 ? "DEMO"
-              : readiness
-                ? "CONFIG REQUIRED"
-                : connector.implemented ? "ADAPTER" : "CATALOG"}
+                : readiness
+                  ? "CONFIG REQUIRED"
+                  : connector.implemented ? "ADAPTER" : "CATALOG"}
           </div>
-          
+
           {toolCount > 0 && (
             <div className="flex items-center gap-1 text-[9px] font-black text-muted-foreground/30 uppercase tracking-widest">
               <Wrench className="h-3 w-3" />
@@ -1154,7 +1386,7 @@ function ConnectorCard({
             href={oauthUrl}
             className={cn(
               "flex w-full items-center justify-between rounded-lg border px-4 py-2.5 text-[12px] font-bold transition-all",
-              connector.id === "github" 
+              connector.id === "github"
                 ? "border-slate-500/30 bg-slate-600/10 text-slate-300 hover:bg-slate-600/20 hover:border-slate-400/50"
                 : "border-blue-500/30 bg-blue-600/10 text-blue-400 hover:bg-blue-600/20 hover:border-blue-400/50"
             )}
@@ -1200,13 +1432,22 @@ function ConnectorCard({
         ) : (
           <button
             onClick={handleToggle}
-            disabled={busy || (!(connected || trulyConnected) && !canDemoConnect && !isOAuthConnector)}
+            disabled={busy || (
+              !(connected || trulyConnected) &&
+              !canDemoConnect &&
+              !isOAuthConnector &&
+              !(isMcpConnector && readiness?.configured)
+            )}
             className="flex w-full items-center justify-between rounded-lg bg-secondary/50 px-4 py-2.5 text-[12px] font-bold transition-all hover:bg-secondary disabled:cursor-not-allowed disabled:opacity-50"
           >
             {busy
               ? "Updating..."
               : (connected || trulyConnected)
                 ? "Disconnect"
+                : isMcpConnector
+                  ? readiness?.configured
+                    ? "Probe MCP"
+                    : "Disabled in config"
                 : canDemoConnect
                   ? "Connect"
                   : "API Key Required"}
@@ -1228,15 +1469,15 @@ function ConnectorCard({
 // ── DAG Visualization ─────────────────────────────────────────────────────
 
 const NODE_KIND_COLORS: Record<string, { bg: string; border: string; text: string; glow: string }> = {
-  signal:     { bg: "bg-blue-500/10",    border: "border-blue-500/30",    text: "text-blue-400",    glow: "shadow-[0_0_12px_rgba(59,130,246,0.3)]" },
-  hypothesis: { bg: "bg-violet-500/10",  border: "border-violet-500/30",  text: "text-violet-400",  glow: "shadow-[0_0_12px_rgba(139,92,246,0.3)]" },
-  branch:     { bg: "bg-cyan-500/10",    border: "border-cyan-500/30",    text: "text-cyan-400",    glow: "shadow-[0_0_12px_rgba(6,182,212,0.3)]" },
-  subagent:   { bg: "bg-amber-500/10",   border: "border-amber-500/30",   text: "text-amber-400",   glow: "shadow-[0_0_12px_rgba(245,158,11,0.3)]" },
-  operator:   { bg: "bg-pink-500/10",    border: "border-pink-500/30",    text: "text-pink-400",    glow: "shadow-[0_0_12px_rgba(236,72,153,0.3)]" },
-  replan:     { bg: "bg-orange-500/10",  border: "border-orange-500/30",  text: "text-orange-400",  glow: "shadow-[0_0_12px_rgba(249,115,22,0.3)]" },
-  action:     { bg: "bg-emerald-500/10", border: "border-emerald-500/30", text: "text-emerald-400", glow: "shadow-[0_0_12px_rgba(16,185,129,0.3)]" },
-  policy:     { bg: "bg-red-500/10",     border: "border-red-500/30",     text: "text-red-400",     glow: "shadow-[0_0_12px_rgba(239,68,68,0.3)]" },
-  validation: { bg: "bg-teal-500/10",    border: "border-teal-500/30",    text: "text-teal-400",    glow: "shadow-[0_0_12px_rgba(20,184,166,0.3)]" },
+  signal: { bg: "bg-blue-500/10", border: "border-blue-500/30", text: "text-blue-400", glow: "shadow-[0_0_12px_rgba(59,130,246,0.3)]" },
+  hypothesis: { bg: "bg-violet-500/10", border: "border-violet-500/30", text: "text-violet-400", glow: "shadow-[0_0_12px_rgba(139,92,246,0.3)]" },
+  branch: { bg: "bg-cyan-500/10", border: "border-cyan-500/30", text: "text-cyan-400", glow: "shadow-[0_0_12px_rgba(6,182,212,0.3)]" },
+  subagent: { bg: "bg-amber-500/10", border: "border-amber-500/30", text: "text-amber-400", glow: "shadow-[0_0_12px_rgba(245,158,11,0.3)]" },
+  operator: { bg: "bg-pink-500/10", border: "border-pink-500/30", text: "text-pink-400", glow: "shadow-[0_0_12px_rgba(236,72,153,0.3)]" },
+  replan: { bg: "bg-orange-500/10", border: "border-orange-500/30", text: "text-orange-400", glow: "shadow-[0_0_12px_rgba(249,115,22,0.3)]" },
+  action: { bg: "bg-emerald-500/10", border: "border-emerald-500/30", text: "text-emerald-400", glow: "shadow-[0_0_12px_rgba(16,185,129,0.3)]" },
+  policy: { bg: "bg-red-500/10", border: "border-red-500/30", text: "text-red-400", glow: "shadow-[0_0_12px_rgba(239,68,68,0.3)]" },
+  validation: { bg: "bg-teal-500/10", border: "border-teal-500/30", text: "text-teal-400", glow: "shadow-[0_0_12px_rgba(20,184,166,0.3)]" },
 };
 
 const DEFAULT_COLOR = { bg: "bg-white/5", border: "border-white/10", text: "text-muted-foreground", glow: "" };
@@ -1305,9 +1546,9 @@ function MissionDAG({ nodes }: { nodes: MissionGraphNode[] }) {
           <div className={cn(
             "grid gap-3",
             layer.length === 1 ? "grid-cols-1 max-w-2xl mx-auto" :
-            layer.length === 2 ? "grid-cols-2" :
-            layer.length === 3 ? "grid-cols-3" :
-            "grid-cols-2 lg:grid-cols-4"
+              layer.length === 2 ? "grid-cols-2" :
+                layer.length === 3 ? "grid-cols-3" :
+                  "grid-cols-2 lg:grid-cols-4"
           )}>
             {layer.map((node) => {
               const colors = NODE_KIND_COLORS[node.kind] || DEFAULT_COLOR;
@@ -1318,15 +1559,15 @@ function MissionDAG({ nodes }: { nodes: MissionGraphNode[] }) {
                   key={node.id}
                   layout
                   initial={{ opacity: 0, y: 16, scale: 0.95 }}
-                  animate={{ 
-                    opacity: 1, 
-                    y: 0, 
+                  animate={{
+                    opacity: 1,
+                    y: 0,
                     scale: 1,
                     borderColor: isRunning ? "rgba(245, 158, 11, 0.4)" : undefined,
                     boxShadow: isRunning ? "0 0 15px rgba(245, 158, 11, 0.15)" : undefined,
                   }}
                   exit={{ opacity: 0, scale: 0.9 }}
-                  transition={{ 
+                  transition={{
                     layout: { type: "spring", stiffness: 300, damping: 30 },
                     opacity: { duration: 0.2 },
                     y: { duration: 0.2 },
@@ -1477,7 +1718,7 @@ function AnalyticsView() {
                   "rounded-full px-3 py-1 text-[11px] font-bold border",
                   status === "complete" ? "border-emerald-500/20 bg-emerald-500/5 text-emerald-400"
                     : status === "failed" ? "border-red-500/20 bg-red-500/5 text-red-400"
-                    : "border-amber-500/20 bg-amber-500/5 text-amber-400"
+                      : "border-amber-500/20 bg-amber-500/5 text-amber-400"
                 )}>
                   {status}: {count}
                 </span>
@@ -1572,8 +1813,8 @@ function AnalyticsView() {
                             className={cn(
                               "h-full rounded-full transition-all duration-700",
                               successRate === null ? "bg-muted-foreground/20" :
-                              successRate >= 0.8 ? "bg-emerald-500" :
-                              successRate >= 0.5 ? "bg-amber-500" : "bg-red-500"
+                                successRate >= 0.8 ? "bg-emerald-500" :
+                                  successRate >= 0.5 ? "bg-amber-500" : "bg-red-500"
                             )}
                             style={{ width: `${successRate !== null ? Math.max(successRate * 100, 3) : 100}%` }}
                           />
@@ -1602,7 +1843,7 @@ function AnalyticsView() {
         <div className="rounded-lg border border-border/40 bg-white/[0.01] p-12 text-center text-muted-foreground">
           <BarChart3 className="h-10 w-10 mx-auto mb-4 opacity-20" />
           <p className="text-[14px] font-bold">No analytics data yet</p>
-          <p className="text-[12px] mt-1 opacity-60">Run a simulation to generate mission, agent, and connector metrics.</p>
+          <p className="text-[12px] mt-1 opacity-60">Submit a signal or run a connected-service check to generate operational metrics.</p>
         </div>
       )}
     </div>
@@ -1614,6 +1855,118 @@ function AnalyticCard({ label, value, accent }: { label: string; value: string; 
     <div className="rounded-xl border border-border/40 bg-white/[0.01] p-4">
       <div className="text-[10px] font-bold uppercase tracking-widest text-muted-foreground/40 mb-1">{label}</div>
       <div className={cn("text-[22px] font-black tracking-tight", accent)}>{value}</div>
+    </div>
+  );
+}
+function ProviderHealthModal({
+  isOpen,
+  onClose,
+  health,
+  connection,
+  stuckCount,
+  onCleanup,
+}: {
+  isOpen: boolean;
+  onClose: () => void;
+  health: ProviderHealth | null;
+  connection: BackendConnection;
+  stuckCount: number;
+  onCleanup: () => void;
+}) {
+  if (!isOpen) return null;
+  return (
+    <div className="fixed inset-0 z-50 flex items-center justify-center" onClick={onClose}>
+      <div className="absolute inset-0 bg-black/60 backdrop-blur-sm" />
+      <motion.div
+        initial={{ opacity: 0, scale: 0.95, y: 10 }}
+        animate={{ opacity: 1, scale: 1, y: 0 }}
+        exit={{ opacity: 0, scale: 0.95, y: 10 }}
+        onClick={(e) => e.stopPropagation()}
+        className="relative z-10 w-full max-w-md mx-4 rounded-2xl border border-border/50 bg-card shadow-2xl overflow-hidden"
+      >
+        <div className="flex items-center justify-between border-b border-border/30 px-6 py-4">
+          <div>
+            <h3 className="text-[15px] font-bold">System Health</h3>
+            <p className="text-[12px] text-muted-foreground mt-0.5">Runtime, provider &amp; mission status</p>
+          </div>
+          <button onClick={onClose} className="text-muted-foreground hover:text-foreground transition-colors">
+            <X className="h-4 w-4" />
+          </button>
+        </div>
+        <div className="p-6 space-y-4">
+          {/* Backend status */}
+          <div className="rounded-xl border border-border/30 bg-white/[0.02] p-4">
+            <div className="text-[10px] font-black uppercase tracking-widest text-muted-foreground/40 mb-3">Backend</div>
+            <div className="flex items-center justify-between">
+              <span className="text-[13px] font-semibold">Connection</span>
+              <span className={cn(
+                "text-[11px] font-bold uppercase px-2 py-0.5 rounded-full",
+                connection.status === "connected" ? "bg-emerald-500/10 text-emerald-500" :
+                  connection.status === "offline" ? "bg-red-500/10 text-red-400" :
+                    "bg-amber-500/10 text-amber-400"
+              )}>
+                {connection.status}
+              </span>
+            </div>
+            <p className="mt-1.5 text-[11px] text-muted-foreground/60">{connection.message}</p>
+            <div className="mt-2 text-[11px] text-muted-foreground/40 font-mono">{connection.apiBase || "same-origin"}</div>
+          </div>
+          {/* LLM provider */}
+          <div className="rounded-xl border border-border/30 bg-white/[0.02] p-4">
+            <div className="text-[10px] font-black uppercase tracking-widest text-muted-foreground/40 mb-3">LLM Provider</div>
+            {health ? (
+              <div className="space-y-2">
+                <div className="flex items-center justify-between">
+                  <span className="text-[13px] font-semibold">{health.active_provider ?? "Unknown"}</span>
+                  <span className={cn(
+                    "text-[11px] font-bold uppercase px-2 py-0.5 rounded-full",
+                    (health.quarantined_slots ?? 0) === 0 ? "bg-emerald-500/10 text-emerald-500" : "bg-amber-500/10 text-amber-400"
+                  )}>
+                    {(health.quarantined_slots ?? 0) === 0 ? "Healthy" : `${health.quarantined_slots} quarantined`}
+                  </span>
+                </div>
+                <div className="flex gap-4 text-[11px] text-muted-foreground/60">
+                  <span>Active slots: <b className="text-foreground">{health.active_slots ?? 0}</b></span>
+                  <span>Total: <b className="text-foreground">{health.total_slots ?? 0}</b></span>
+                </div>
+                {Array.isArray(health.slots) && health.slots.length > 0 && (
+                  <div className="mt-3 space-y-1.5">
+                    {health.slots.map((slot: ProviderSlotHealth, i: number) => (
+                      <div key={i} className="flex items-center justify-between text-[11px] rounded-lg bg-white/[0.02] px-3 py-1.5">
+                        <span className="font-mono text-muted-foreground/70 truncate max-w-[180px]">{slot.name ?? `Slot ${i + 1}`}</span>
+                        <span className={cn(
+                          "font-bold uppercase",
+                          slot.status === "ok" ? "text-emerald-500" :
+                            slot.status === "quarantined" ? "text-red-400" : "text-amber-400"
+                        )}>{slot.status}</span>
+                      </div>
+                    ))}
+                  </div>
+                )}
+              </div>
+            ) : (
+              <p className="text-[12px] text-muted-foreground/50">Provider health data not yet available.</p>
+            )}
+          </div>
+          {/* Stuck missions */}
+          {stuckCount > 0 && (
+            <div className="rounded-xl border border-amber-500/20 bg-amber-500/5 p-4">
+              <div className="flex items-center justify-between">
+                <div>
+                  <div className="text-[10px] font-black uppercase tracking-widest text-amber-400/60 mb-1">Stuck Missions</div>
+                  <p className="text-[13px] font-semibold text-amber-300">{stuckCount} mission{stuckCount > 1 ? "s" : ""} appear stuck (&gt;15 min)</p>
+                </div>
+                <button
+                  onClick={() => { onCleanup(); onClose(); }}
+                  className="rounded-lg border border-amber-500/30 bg-amber-500/10 px-3 py-1.5 text-[11px] font-bold text-amber-400 hover:bg-amber-500/20 transition-colors"
+                >
+                  Clean up
+                </button>
+              </div>
+            </div>
+          )}
+        </div>
+      </motion.div>
     </div>
   );
 }

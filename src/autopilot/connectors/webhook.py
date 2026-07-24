@@ -113,7 +113,9 @@ class SentryConnector(Connector):
     async def search(self, query: str) -> list:
         """Search Sentry issues via the REST API."""
         import os
+
         import httpx
+
         from autopilot.models import Evidence
 
         token = os.getenv("SENTRY_TOKEN", "").strip()
@@ -186,7 +188,9 @@ class SentryConnector(Connector):
     async def action(self, name: str, payload: dict[str, Any]) -> Any:
         """Execute a Sentry action (mark_investigating → acknowledge)."""
         import os
+
         import httpx
+
         from autopilot.models import ActionResult
 
         if name != "mark_investigating":

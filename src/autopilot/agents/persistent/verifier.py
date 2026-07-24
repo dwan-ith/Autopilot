@@ -11,10 +11,9 @@ between investigation and action.
 from __future__ import annotations
 
 import logging
-from typing import Any
 
 from autopilot.agents.base import AgentResult, PersistentAgent, SubAgent
-from autopilot.models import Evidence, Hypothesis, Mission
+from autopilot.models import Mission
 
 log = logging.getLogger("autopilot.agents.verifier")
 

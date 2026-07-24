@@ -19,8 +19,9 @@ import json
 import logging
 import os
 import secrets
+from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
-from typing import Any, AsyncIterator
+from typing import Any
 
 from autopilot.agents.persistent.memory import MemoryAgent
 from autopilot.connectors.base import ConnectorRegistry
@@ -147,12 +148,22 @@ class RuntimeKernel:
         task = self._tasks.get(mission_id)
         if task and not task.done():
             return
-        self._tasks[mission_id] = asyncio.create_task(self.run_mission(mission_id))
+        task = asyncio.create_task(self.run_mission(mission_id))
+        self._tasks[mission_id] = task
 
-    async def wait_for(self, mission_id: str) -> None:
+        def cleanup(completed: asyncio.Task) -> None:
+            if self._tasks.get(mission_id) is completed:
+                self._tasks.pop(mission_id, None)
+                self._mission_locks.pop(mission_id, None)
+
+        task.add_done_callback(cleanup)
+
+    async def wait_for(self, mission_id: str) -> Mission | None:
         task = self._tasks.get(mission_id)
         if task:
-            await task
+            # A disconnected API/MCP waiter must not cancel the mission itself.
+            await asyncio.shield(task)
+        return self.store.get_mission(mission_id)
 
     def resume_active(self) -> None:
         for mission in self.store.active_missions():
@@ -198,13 +209,14 @@ class RuntimeKernel:
 
     # ── Mission execution  (Orchestrator role) ──────────────────────────────
 
-    async def run_mission(self, mission_id: str) -> None:
+    async def run_mission(self, mission_or_id: str | Mission) -> Mission | None:
+        mission_id = mission_or_id.id if isinstance(mission_or_id, Mission) else mission_or_id
         lock = self._mission_locks.setdefault(mission_id, asyncio.Lock())
         async with lock:
             timeout = max(30, int(os.getenv("AUTOPILOT_MISSION_TIMEOUT_SECONDS", "300")))
             try:
                 await asyncio.wait_for(self._run_mission_locked(mission_id), timeout=timeout)
-            except asyncio.TimeoutError:
+            except TimeoutError:
                 mission = self.store.get_mission(mission_id)
                 if mission and mission.status not in {MissionStatus.COMPLETE, MissionStatus.CANCELED}:
                     mission.status = MissionStatus.FAILED
@@ -219,6 +231,7 @@ class RuntimeKernel:
                     ))
                     self.store.update_mission(mission)
                 self.tracer.emit(mission_id, "mission.timeout", "failed", {"timeout_seconds": timeout})
+        return self.store.get_mission(mission_id)
 
     async def _run_mission_locked(self, mission_id: str) -> None:
         mission = self.store.get_mission(mission_id)

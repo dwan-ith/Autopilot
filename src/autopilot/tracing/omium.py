@@ -23,7 +23,7 @@ import json
 import logging
 import os
 import time
-from datetime import timezone
+from datetime import UTC
 from typing import Any
 
 import httpx
@@ -286,7 +286,7 @@ class TraceSink:
 
 def _now_iso() -> str:
     from datetime import datetime
-    return datetime.now(timezone.utc).isoformat()
+    return datetime.now(UTC).isoformat()
 
 
 def _env_enabled(name: str) -> bool:

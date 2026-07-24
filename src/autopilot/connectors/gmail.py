@@ -14,7 +14,6 @@ Env: GOOGLE_CLIENT_ID, GOOGLE_CLIENT_SECRET
 from __future__ import annotations
 
 import base64
-import os
 from pathlib import Path
 from typing import Any
 
@@ -22,14 +21,18 @@ import httpx
 
 from autopilot.connectors.base import Connector
 from autopilot.connectors.oauth import (
-    SCOPES_GMAIL,
-    OAuthTokenStore,
-    build_google_auth_url,
     get_valid_token,
     google_configured,
     is_authorized,
 )
-from autopilot.models import ActionResult, Capability, ConnectorManifest, ConnectorToolSpec, Evidence, Signal
+from autopilot.models import (
+    ActionResult,
+    Capability,
+    ConnectorManifest,
+    ConnectorToolSpec,
+    Evidence,
+    Signal,
+)
 from autopilot.storage import DB_PATH
 
 GMAIL_API = "https://gmail.googleapis.com/gmail/v1/users/me"
@@ -106,7 +109,7 @@ class GmailConnector(Connector):
             "action_ready": authorized,
             "missing": [],
             "mode": "oauth",
-            "auth_url": build_google_auth_url(state="gmail", scopes=SCOPES_GMAIL) if not authorized else None,
+            "auth_url": "/oauth/authorize/gmail" if not authorized else None,
             "detail": "Gmail OAuth2 connected." if authorized else "Not authorized — visit auth_url to connect.",
             "action": action,
             "integration_live": authorized,
@@ -123,7 +126,7 @@ class GmailConnector(Connector):
         if not headers:
             return [Evidence(
                 source="gmail", title="Gmail not authorized",
-                summary=f"Visit /oauth/authorize/gmail to connect. {build_google_auth_url('gmail', SCOPES_GMAIL)}",
+                summary="Visit /oauth/authorize/gmail to connect.",
                 confidence=0.0,
             )]
         try:
@@ -154,7 +157,7 @@ class GmailConnector(Connector):
                             confidence=0.75,
                         ))
                 return results
-        except Exception as e:
+        except (httpx.RequestError, httpx.HTTPStatusError, KeyError, ValueError) as e:
             return [Evidence(source="gmail", title="Gmail search failed", summary=str(e), confidence=0.0)]
 
     async def read(self, ref: str) -> dict[str, Any]:
@@ -287,6 +290,12 @@ class GmailConnector(Connector):
                 ),
                 parameters={"query": "Gmail search query (e.g. 'subject:incident from:customer')"},
                 fn=self.search,
-            )
+            ),
+            Tool(
+                name="gmail_read_thread",
+                description="Read the messages in an authorized Gmail thread.",
+                parameters={"ref": "Gmail thread id"},
+                fn=self.read,
+            ),
         ]
 

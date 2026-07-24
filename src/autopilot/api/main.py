@@ -9,44 +9,63 @@ import os
 import secrets
 import time
 from contextlib import asynccontextmanager
-from pathlib import Path
 from typing import Any
 
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse, HTMLResponse, StreamingResponse
+from fastapi.responses import (
+    FileResponse,
+    HTMLResponse,
+    RedirectResponse,
+    StreamingResponse,
+)
 from fastapi.staticfiles import StaticFiles
 
 from autopilot.connectors import default_registry
-from autopilot.connectors.service import ConnectorDirectory
-from autopilot.connectors.github_connector import GitHubConnector
-from autopilot.connectors.knowledge import KnowledgeConnector
 from autopilot.connectors.actions import ArtifactConnector, NotificationConnector
-from autopilot.connectors.linear import LinearConnector
+from autopilot.connectors.github_connector import GitHubConnector
 from autopilot.connectors.gmail import GmailConnector
 from autopilot.connectors.google_drive import GoogleDriveConnector
+from autopilot.connectors.knowledge import KnowledgeConnector
+from autopilot.connectors.linear import LinearConnector
 from autopilot.connectors.notion import NotionConnector
-from autopilot.connectors.tavily import TavilyConnector
-from autopilot.connectors.weather import WeatherConnector
-from autopilot.connectors.webhook import SentryConnector, WebhookConnector
 from autopilot.connectors.oauth import (
-    OAuthTokenStore,
     SCOPES_COMBINED,
     SCOPES_DRIVE,
     SCOPES_GMAIL,
-    build_google_auth_url,
+    OAuthTokenStore,
     build_github_auth_url,
+    build_google_auth_url,
     exchange_code,
     exchange_github_code,
-    google_configured,
     github_configured,
+    google_configured,
     mirror_google_oauth_to_siblings,
 )
+from autopilot.connectors.service import ConnectorDirectory
+from autopilot.connectors.tavily import TavilyConnector
+from autopilot.connectors.weather import WeatherConnector
+from autopilot.connectors.webhook import SentryConnector, WebhookConnector
 from autopilot.kernel import RuntimeKernel
-from autopilot.models import ActionResult, ApprovalStatus, AuthMode, Capability, GraphNodeKind, MissionGraphNode, Signal, StepStatus, WebhookSignalRequest, new_id, utc_now
-from autopilot.operators.llm import active_provider_name, preflight_providers, provider_health
+from autopilot.models import (
+    ActionResult,
+    ApprovalStatus,
+    AuthMode,
+    Capability,
+    GraphNodeKind,
+    MissionGraphNode,
+    Signal,
+    StepStatus,
+    WebhookSignalRequest,
+    new_id,
+    utc_now,
+)
+from autopilot.operators.llm import (
+    active_provider_name,
+    preflight_providers,
+    provider_health,
+)
 from autopilot.storage import ARTIFACT_DIR, ROOT, Store
-from fastapi.responses import RedirectResponse
 
 CONNECTOR_CLASSES = {
     "github": GitHubConnector,
@@ -231,7 +250,7 @@ def _init_omium_sdk_if_configured() -> dict[str, Any]:
 async def lifespan(app: FastAPI):
     # Ensure the DB schema has the composite PK migration applied
     try:
-        import importlib.util, sys
+        import importlib.util
         spec = importlib.util.spec_from_file_location("migrate_db", ROOT / "../../../migrate_db.py")
         if spec and spec.loader:
             mod = importlib.util.module_from_spec(spec)
@@ -239,6 +258,10 @@ async def lifespan(app: FastAPI):
             mod.migrate()
     except Exception:
         pass  # Non-fatal — migration already applied or script not present
+    try:
+        store.prune_stale_traces(days=7)
+    except Exception as exc:
+        logging.getLogger("autopilot.api").warning("Trace cleanup failed: %s", exc)
     omium_status = _init_omium_sdk_if_configured()
     store.trace(None, "omium.sdk.status", "complete" if omium_status.get("initialized") else "skipped", omium_status)
     if os.getenv("AUTOPILOT_PROVIDER_PREFLIGHT_ON_STARTUP", "").lower() in {"1", "true", "yes"}:
@@ -918,8 +941,13 @@ async def events(request: Request) -> StreamingResponse:
 
 # ── Scoped agent routes ─────────────────────────────────────────────────────
 
-from autopilot.agents.specialized import CloudInfraAgent, ProjectMgmtAgent, SecurityAuditAgent
+from autopilot.agents.specialized import (
+    CloudInfraAgent,
+    ProjectMgmtAgent,
+    SecurityAuditAgent,
+)
 from autopilot.state_store import StateStore as _StateStore
+
 
 @app.post("/api/agents/project-mgmt/create-issue")
 async def agent_project_mgmt_create_issue(request: Request, payload: dict[str, Any] | None = None) -> dict[str, Any]:
@@ -1059,7 +1087,7 @@ async def metrics(request: Request) -> dict[str, Any]:
     failed_actions = sum(c["failed"] for c in connector_data)
 
     # LLM pool health
-    from autopilot.operators.llm import active_provider_name, _BAD_SLOTS, _build_slots
+    from autopilot.operators.llm import _BAD_SLOTS, _build_slots, active_provider_name
     all_slots = _build_slots()
     quarantined_count = len(_BAD_SLOTS)
     active_slot_count = len(all_slots) - quarantined_count

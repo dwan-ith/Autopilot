@@ -26,14 +26,14 @@ _SLOT_DEFS: list[tuple[str, str, str, str, dict]] = [
         "openrouter-2",
         "https://openrouter.ai/api/v1/chat/completions",
         "OPENROUTER_API_KEY_2",
-        "google/gemini-2.0-flash-001",
+        "openrouter/free",
         {"HTTP-Referer": "https://github.com/dwan-ith/Autopilot", "X-Title": "AUTOPILOT"},
     ),
     (
         "openrouter-3",
         "https://openrouter.ai/api/v1/chat/completions",
         "OPENROUTER_API_KEY_3",
-        "google/gemini-2.0-flash-001",
+        "openrouter/free",
         {"HTTP-Referer": "https://github.com/dwan-ith/Autopilot", "X-Title": "AUTOPILOT"},
     ),
     # Primary OpenRouter key last — has no credits, will only be tried if all others fail
@@ -41,7 +41,7 @@ _SLOT_DEFS: list[tuple[str, str, str, str, dict]] = [
         "openrouter-1",
         "https://openrouter.ai/api/v1/chat/completions",
         "OPENROUTER_API_KEY",
-        "google/gemini-2.0-flash-001",
+        "openrouter/free",
         {"HTTP-Referer": "https://github.com/dwan-ith/Autopilot", "X-Title": "AUTOPILOT"},
     ),
 ]
@@ -129,7 +129,9 @@ def _build_slots() -> list[dict[str, Any]]:
     for name, url, env_key, model, extra in _SLOT_DEFS:
         key = os.getenv(env_key, "").strip()
         if key:
-            slots.append({"name": name, "url": url, "env_key": env_key, "key": key, "model": model, "extra": extra})
+            model_env = "AUTOPILOT_OPENROUTER_MODEL" if name.startswith("openrouter") else "AUTOPILOT_GROQ_MODEL"
+            selected_model = os.getenv(model_env, "").strip() or model
+            slots.append({"name": name, "url": url, "env_key": env_key, "key": key, "model": selected_model, "extra": extra})
     return slots
 
 
@@ -244,6 +246,25 @@ async def _call_slot(
                 if resp.status_code in {401, 402, 403}:
                     _quarantine_slot(slot["name"], f"HTTP {resp.status_code}: {resp.text[:160]}")
                     return None
+                if 400 <= resp.status_code < 500:
+                    _quarantine_slot(slot["name"], f"HTTP {resp.status_code}: {resp.text[:160]}")
+                    return None
+                if resp.status_code >= 500:
+                    delay = min(2.0, 0.25 * (2**attempt))
+                    _record_slot_status(
+                        slot["name"],
+                        "provider_error",
+                        f"HTTP {resp.status_code}; retry in {delay:.2f}s",
+                    )
+                    if attempt + 1 >= max_attempts:
+                        _quarantine_slot(
+                            slot["name"],
+                            f"HTTP {resp.status_code} after {max_attempts} attempt(s)",
+                            short=True,
+                        )
+                        return None
+                    await asyncio.sleep(delay)
+                    continue
                 resp.raise_for_status()
                 data = resp.json()
                 text = data["choices"][0]["message"]["content"]
@@ -253,16 +274,31 @@ async def _call_slot(
         except httpx.TimeoutException:
             delay = min(2.0, 0.25 * (2**attempt))
             _record_slot_status(slot["name"], "timeout", "provider request timed out")
+            if attempt + 1 >= max_attempts:
+                _quarantine_slot(
+                    slot["name"],
+                    f"Provider timed out after {max_attempts} attempt(s)",
+                    short=True,
+                )
+                return None
             log.warning("LLM %s timeout; retrying in %.2fs", slot["name"], delay)
             await asyncio.sleep(delay)
             continue
         except httpx.HTTPStatusError as exc:
             log.error("LLM %s HTTP %s: %s", slot["name"], exc.response.status_code, exc.response.text[:300])
-            _record_slot_status(slot["name"], "http_error", f"HTTP {exc.response.status_code}: {exc.response.text[:160]}")
+            _quarantine_slot(
+                slot["name"],
+                f"HTTP {exc.response.status_code}: {exc.response.text[:160]}",
+                short=exc.response.status_code >= 500,
+            )
+            return None
+        except httpx.RequestError as exc:
+            log.error("LLM %s transport error: %s", slot["name"], exc)
+            _quarantine_slot(slot["name"], f"Transport error: {exc}", short=True)
             return None
         except Exception as exc:
             log.error("LLM %s error: %s", slot["name"], exc)
-            _record_slot_status(slot["name"], "error", str(exc)[:200])
+            _quarantine_slot(slot["name"], f"{type(exc).__name__}: {exc}", short=True)
             return None
     return None
 
@@ -315,7 +351,7 @@ def _record_slot_status(
 
 
 def provider_health() -> dict[str, Any]:
-    """Return demo-safe provider pool status without exposing keys."""
+    """Return provider pool status without exposing keys."""
     _load_state()
     now = _now()
     slots = _build_slots()
@@ -337,10 +373,13 @@ def provider_health() -> dict[str, Any]:
             "last_checked_at": status.get("last_checked_at"),
         })
     active = [row for row in rows if not row["quarantined"]]
+    pname = active_provider_name()
     return {
         "disabled": _DISABLE_LLM,
-        "provider": active_provider_name(),
+        "provider": pname,
+        "active_provider": pname,
         "configured_slots": len(rows),
+        "total_slots": len(rows),
         "active_slots": len(active),
         "quarantined_slots": len(rows) - len(active),
         "slots": rows,

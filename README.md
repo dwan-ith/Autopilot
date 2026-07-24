@@ -57,6 +57,9 @@ Implemented integrations include:
 - **Knowledge**: Local runbooks, Google Drive, Notion, Tavily.
 - **Observability**: Sentry, Weather.
 - **System**: Durable artifacts and generic webhooks.
+- **MCP**: Official-SDK stdio and Streamable HTTP clients, plus authenticated
+  stdio and Streamable HTTP servers that expose connector reads and AUTOPILOT
+  mission control with accurate read/write annotations and bounded polling.
 
 Connector readiness is explicit. Some connectors require user credentials for
 real side effects, while others have useful no-key fallbacks:
@@ -101,8 +104,15 @@ Set the following environment variables in `.env` to enable specific features:
 
 | Variable | Description |
 |---|---|
+| `AUTOPILOT_HOST` | Backend bind host; defaults to loopback `127.0.0.1`. Set `0.0.0.0` only behind an authenticated deployment boundary. |
 | `AUTOPILOT_API_KEY` | Protects API endpoints and webhooks. |
 | `AUTOPILOT_WEBHOOK_SECRET` | Enables HMAC signature verification for inbound webhooks. |
+| `AUTOPILOT_OAUTH_STATE_SECRET` | Signs OAuth state tokens; defaults to `AUTOPILOT_API_KEY` when set. |
+| `AUTOPILOT_CREDENTIAL_ENCRYPTION_KEY` | Encrypts persisted OAuth tokens; defaults to `AUTOPILOT_API_KEY` when set. |
+| `AUTOPILOT_PUBLIC_URL` | Public HTTPS origin used in remote MCP client configuration. |
+| `AUTOPILOT_MCP_API_KEY` | Optional separate bearer/API key for `/mcp/`; remote access refuses open unauthenticated hosts. |
+| `AUTOPILOT_MCP_ALLOWED_HOSTS` | Exact/wildcard hosts accepted by the MCP DNS-rebinding guard. |
+| `AUTOPILOT_MCP_ALLOWED_ORIGINS` | Browser origins accepted by the MCP DNS-rebinding guard. |
 | `AUTOPILOT_DISABLE_LLM=1` | Runs the system in offline, deterministic heuristic mode. |
 | `AUTOPILOT_PROVIDER_PREFLIGHT_ON_STARTUP` | `1` to run provider preflight at startup and quarantine bad LLM slots before missions. |
 | `AUTOPILOT_LLM_TIMEOUT_SECONDS` | Per-provider LLM request timeout. |
@@ -111,6 +121,8 @@ Set the following environment variables in `.env` to enable specific features:
 | `AUTOPILOT_MONITOR_INTERVAL_SECONDS` | Background monitor interval, minimum 30 seconds. |
 | `OPENROUTER_API_KEY` | Primary LLM provider key (recommended). |
 | `GROQ_API_KEY` | Fallback LLM provider key. |
+| `AUTOPILOT_GROQ_MODEL` | Optional Groq model override. |
+| `AUTOPILOT_OPENROUTER_MODEL` | OpenRouter model override (default `openrouter/free`). |
 | `OMIUM_API_KEY` | Omium SDK/API authentication (required when Omium integration is enabled). |
 | `OMIUM_SDK_INIT` | `1` to call `omium.init()` at startup (after `pip install ".[omium]"`). |
 | `OMIUM_PROJECT` | Omium project name (default `autopilot`). |
@@ -125,6 +137,101 @@ Set the following environment variables in `.env` to enable specific features:
 | `TAVILY_API_KEY` | Upgrades the knowledge connector to perform live AI-driven web searches. |
 
 Additional connector-specific keys (e.g., `GITHUB_TOKEN`, `NOTION_API_KEY`, `LINEAR_API_KEY`) are documented in `.env.example`.
+
+### Model Context Protocol
+
+MCP servers are loaded from `data/mcp_servers.json` (override with
+`AUTOPILOT_MCP_CONFIG`). A server is not reported live until the SDK completes
+the MCP initialization handshake and tool discovery. The checked-in
+`autopilot-native` entry is a local stdio proof that exposes Autopilot's real
+read-only connector tools.
+
+```json
+{
+  "mcpServers": {
+    "remote-search": {
+      "enabled": true,
+      "transport": "streamable_http",
+      "url": "https://mcp.example.com/mcp",
+      "headers": {
+        "Authorization": "Bearer ${REMOTE_MCP_TOKEN}"
+      },
+      "allowedTools": ["search"],
+      "allowedWriteTools": []
+    }
+  }
+}
+```
+
+For stdio, use `command`, `args`, optional `cwd`, and `env`. Configuration never
+uses a shell. Environment references use `${NAME}` and unresolved references
+block enabled servers. Remote tools reach autonomous investigators only when
+the server marks them read-only. Side-effecting tools require both an
+`allowedWriteTools` entry and `confirm=true` on the explicit tool-call API.
+
+AUTOPILOT also serves its own MCP interface. It exposes read-only connector
+tools plus `autopilot_status`, mission reads, pending-approval reads,
+`autopilot_submit_signal`, and `autopilot_wait_for_mission`. Signal submission
+is correctly marked non-read-only. Approval execution stays in AUTOPILOT so an
+external model cannot silently bypass policy review.
+
+Run the local stdio server directly with:
+
+```bash
+autopilot-mcp
+# or
+python -m autopilot.mcp_server
+```
+
+The backend serves authenticated Streamable HTTP at `http://localhost:8090/mcp/`.
+`GET /api/mcp/client-config` returns secret-free, environment-based setup
+material for each client.
+
+### Connect Codex
+
+The repository includes `.codex/config.toml` for the local backend. Equivalent
+manual configuration is:
+
+```toml
+[mcp_servers.autopilot]
+url = "http://localhost:8090/mcp/"
+bearer_token_env_var = "AUTOPILOT_MCP_API_KEY"
+```
+
+If `AUTOPILOT_MCP_API_KEY` is blank and `AUTOPILOT_API_KEY` protects the backend,
+use `AUTOPILOT_API_KEY` as `bearer_token_env_var`. For a process-local setup,
+Codex can also launch `python -m autopilot.mcp_server` over stdio.
+
+### Connect Claude
+
+The repository includes `.mcp.json` with the project-scoped HTTP server.
+Equivalent CLI configuration is:
+
+```bash
+claude mcp add --transport http autopilot http://localhost:8090/mcp/ \
+  --header "Authorization: Bearer your-autopilot-mcp-key"
+```
+
+Claude project configuration can use `${AUTOPILOT_MCP_API_KEY}` in the
+`Authorization` header; the dashboard renders the exact JSON without embedding
+the secret.
+
+### Connect Perplexity Computer
+
+Perplexity custom remote connectors cannot call localhost. Publish the backend
+behind HTTPS, then set:
+
+```dotenv
+AUTOPILOT_PUBLIC_URL=https://autopilot.example.com
+AUTOPILOT_MCP_API_KEY=<strong-random-key>
+AUTOPILOT_MCP_ALLOWED_HOSTS=autopilot.example.com
+AUTOPILOT_MCP_ALLOWED_ORIGINS=https://www.perplexity.ai
+```
+
+In Perplexity, add a Remote custom connector using
+`https://autopilot.example.com/mcp/`, choose **Streamable HTTP**, and choose
+**API Key** authentication. Local HTTP is intentionally reported as not ready
+for Perplexity.
 
 ## Testing
 
@@ -147,6 +254,10 @@ AUTOPILOT no longer runs "canned" simulation demos. The dashboard's **Manual Sig
 When a webhook is received or the monitor triggers, AUTOPILOT correlates the events, expands a dynamic mission graph, spawns parallel investigations using actual search and API tools, verifies confidence, writes an evidence-backed mission brief, and surfaces policy-gated side effects (like creating a GitHub issue or posting to a Slack channel) for human-in-the-loop approval. The dashboard stream reflects these missions globally without hardcoded UI limits.
 
 Highlights:
+- `GET /api/mcp/servers` - configured MCP servers, handshake state, and discovered tools.
+- `GET /api/mcp/client-config` - Codex, Claude, and Perplexity connection material and remote-readiness truth.
+- `POST /api/mcp/servers/{id}/probe` - perform a real MCP handshake and tool discovery.
+- `POST /api/mcp/servers/{id}/tools/{tool}` - invoke a discovered tool with explicit write controls.
 - `POST /api/monitoring/check` — inspect connected services and create a mission only if a real connected service is degraded.
 - `GET /api/operators` — live capability-driven catalog of connectors and readiness states.
 - `POST /api/operators/{id}/probe` — bounded probes with real side effects where declared.

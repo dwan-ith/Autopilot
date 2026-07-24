@@ -13,7 +13,6 @@ Env: GOOGLE_CLIENT_ID, GOOGLE_CLIENT_SECRET
 
 from __future__ import annotations
 
-import os
 from pathlib import Path
 from typing import Any
 
@@ -21,13 +20,17 @@ import httpx
 
 from autopilot.connectors.base import Connector
 from autopilot.connectors.oauth import (
-    SCOPES_DRIVE,
-    build_google_auth_url,
     get_valid_token,
     google_configured,
     is_authorized,
 )
-from autopilot.models import ActionResult, Capability, ConnectorManifest, ConnectorToolSpec, Evidence
+from autopilot.models import (
+    ActionResult,
+    Capability,
+    ConnectorManifest,
+    ConnectorToolSpec,
+    Evidence,
+)
 from autopilot.storage import DB_PATH
 
 DRIVE_API = "https://www.googleapis.com/drive/v3"
@@ -102,7 +105,7 @@ class GoogleDriveConnector(Connector):
             "action_ready": authorized,
             "missing": [],
             "mode": "oauth",
-            "auth_url": build_google_auth_url(state="google_drive", scopes=SCOPES_DRIVE) if not authorized else None,
+            "auth_url": "/oauth/authorize/google_drive" if not authorized else None,
             "detail": "Google Drive OAuth2 connected." if authorized else "Not authorized — visit auth_url to connect.",
             "action": action,
             "integration_live": authorized,
@@ -119,7 +122,7 @@ class GoogleDriveConnector(Connector):
         if not headers:
             return [Evidence(
                 source="google_drive", title="Google Drive not authorized",
-                summary=f"Visit /oauth/authorize/google_drive to connect.",
+                summary="Visit /oauth/authorize/google_drive to connect.",
                 confidence=0.0,
             )]
         try:
@@ -145,7 +148,7 @@ class GoogleDriveConnector(Connector):
                         confidence=0.72,
                     ))
                 return results
-        except Exception as e:
+        except (httpx.RequestError, httpx.HTTPStatusError, KeyError, ValueError) as e:
             return [Evidence(source="google_drive", title="Drive search failed", summary=str(e), confidence=0.0)]
 
     async def read(self, ref: str) -> dict[str, Any]:
@@ -301,6 +304,12 @@ class GoogleDriveConnector(Connector):
                 ),
                 parameters={"query": "Drive search query (e.g. 'post-mortem incident 2024')"},
                 fn=self.search,
-            )
+            ),
+            Tool(
+                name="drive_read_file",
+                description="Read text content from an authorized Google Drive file.",
+                parameters={"ref": "Google Drive file id"},
+                fn=self.read,
+            ),
         ]
 

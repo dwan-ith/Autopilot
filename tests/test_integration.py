@@ -13,12 +13,10 @@ Run:
 
 from __future__ import annotations
 
-import os
 import asyncio
-import json
-import pytest
-import pytest_asyncio
+import os
 
+import pytest
 
 # ── Gate: skip entire module unless explicitly opted in ─────────────────────
 
@@ -59,7 +57,7 @@ def integration_store(tmp_path_factory):
 @pytest.fixture(scope="module")
 def integration_registry():
     """Connector registry with all free/keyless connectors loaded."""
-    from autopilot.connectors.registry import default_registry
+    from autopilot.connectors import default_registry
     return default_registry()
 
 
@@ -75,7 +73,7 @@ def integration_kernel(integration_store, integration_registry):
 @pytest.mark.asyncio
 async def test_llm_groq_responds():
     """Verify that at least one Groq slot returns a parseable JSON response."""
-    from autopilot.operators.llm import reason, parse_json
+    from autopilot.operators.llm import parse_json, reason
 
     raw = await reason(
         role="investigator",
@@ -155,7 +153,7 @@ async def test_e2e_mission_ingestion(integration_kernel):
     assert mission is not None, "ingest() returned None"
     assert mission.id, "Mission has no ID"
     assert mission.title, "Mission has no title"
-    assert mission.status.value in {"queued", "running", "resolved", "unresolved", "failed"}, \
+    assert mission.status.value in {"queued", "running", "waiting", "complete", "failed"}, \
         f"Unexpected mission status: {mission.status}"
 
     # Run full mission
@@ -166,7 +164,7 @@ async def test_e2e_mission_ingestion(integration_kernel):
     )
 
     assert completed is not None, "run_mission() returned None"
-    assert completed.status.value in {"resolved", "unresolved"}, \
+    assert completed.status.value in {"complete", "failed"}, \
         f"Mission didn't finish: {completed.status}"
     assert completed.confidence > 0.0, "Final confidence was 0 — agent loop didn't run"
     assert len(completed.agent_runs) > 0, "No agent runs recorded"
@@ -179,7 +177,7 @@ async def test_e2e_mission_ingestion(integration_kernel):
 async def test_memory_type_keyed_recall(integration_store):
     """Verify type-keyed memory recall returns the stored pattern on the same key."""
     from autopilot.agents.persistent.memory import MemoryAgent
-    from autopilot.models import Signal, Mission
+    from autopilot.models import Mission, Signal
 
     mem = MemoryAgent(integration_store)
 
@@ -247,10 +245,11 @@ async def test_tavily_ddg_fallback():
 
 def test_security_audit_pattern_detection():
     """Verify SecurityAuditAgent detects high-risk patterns in changed files."""
-    from autopilot.agents.specialized import SecurityAuditAgent
-    from autopilot.connectors.registry import default_registry
-    from autopilot.storage import Store
     import tempfile
+
+    from autopilot.agents.specialized import SecurityAuditAgent
+    from autopilot.connectors import default_registry
+    from autopilot.storage import Store
 
     with tempfile.TemporaryDirectory() as tmp:
         store = Store(path=(lambda: __import__("pathlib").Path(tmp) / "test.db")())

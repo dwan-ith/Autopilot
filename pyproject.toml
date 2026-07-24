@@ -16,11 +16,17 @@ dependencies = [
     "python-dotenv==1.0.1",
     "httpx==0.28.1",
     "python-multipart==0.0.20",
+    "mcp>=1.25,<2",
+    "cryptography>=46,<47",
 ]
+
+[project.scripts]
+autopilot-mcp = "autopilot.mcp_server:run"
 
 [project.optional-dependencies]
 dev = [
     "pytest>=8",
+    "pytest-asyncio>=0.24",
 ]
 omium = [
     "omium>=0.4.1,<0.5",

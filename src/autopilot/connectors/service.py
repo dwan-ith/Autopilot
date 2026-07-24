@@ -1,11 +1,17 @@
 from __future__ import annotations
 
-from datetime import timezone
+from datetime import UTC
 from typing import Any
 
-from autopilot.connectors.catalog import CATALOG, catalog_by_id
+from autopilot.connectors.catalog import catalog_by_id
 from autopilot.connectors.oauth import is_authorized
-from autopilot.models import AuthMode, ConnectorCatalogItem, ConnectorConnection, ConnectorStatus, utc_now
+from autopilot.models import (
+    AuthMode,
+    ConnectorCatalogItem,
+    ConnectorConnection,
+    ConnectorStatus,
+    utc_now,
+)
 from autopilot.storage import Store
 
 
@@ -40,6 +46,23 @@ def _live_connected_directory(
     return False
 
 
+def _public_credentials_ref(connection: ConnectorConnection | None) -> str | None:
+    """Expose reference names, never credential material or secret URLs."""
+    if not connection or not connection.credentials_ref:
+        return None
+    value = connection.credentials_ref.strip()
+    if connection.auth_mode == AuthMode.OAUTH:
+        return "***stored***"
+    lowered = value.lower()
+    if (
+        lowered.startswith(("http://", "https://", "fernet:"))
+        or value.startswith(("{", "["))
+        or len(value) > 128
+    ):
+        return "***redacted***"
+    return value
+
+
 class ConnectorDirectory:
     """User-facing connector directory and connection state manager."""
 
@@ -51,7 +74,7 @@ class ConnectorDirectory:
         connections = {connection.connector_id: connection for connection in self.store.list_connector_connections(user_id)}
         return [
             self._view(item, connections.get(item.id))
-            for item in sorted(CATALOG, key=lambda c: ("zzz", "zzz") if c.id == "slack" else (c.category, c.name))
+            for item in sorted(self.catalog.values(), key=lambda c: ("zzz", "zzz") if c.id == "slack" else (c.category, c.name))
         ]
 
     def connect(
@@ -116,12 +139,12 @@ class ConnectorDirectory:
         return {
             **item.model_dump(),
             "status": connection.status.value if connection else ConnectorStatus.AVAILABLE.value,
-            "connected_at": connection.connected_at.astimezone(timezone.utc).isoformat()
+            "connected_at": connection.connected_at.astimezone(UTC).isoformat()
             if connection and connection.connected_at
             else None,
             "granted_scopes": connection.granted_scopes if connection else [],
             "connection_auth_mode": connection.auth_mode.value if connection else None,
-            "credentials_ref": connection.credentials_ref if connection else None,
+            "credentials_ref": _public_credentials_ref(connection),
             "connection_metadata": connection.metadata if connection else {},
             "oauth_token_present": oauth_token_present,
             "live_connected": _live_connected_directory(item, connection, oauth_token_present),

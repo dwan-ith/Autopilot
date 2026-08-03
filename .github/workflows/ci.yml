@@ -9,6 +9,9 @@ on:
 jobs:
   build-and-test:
     runs-on: ubuntu-latest
+    env:
+      AUTOPILOT_DISABLE_LLM: 1
+      AUTOPILOT_CREDENTIAL_ENCRYPTION_KEY: "test-key-for-ci-action-only-not-for-prod"
     steps:
     - uses: actions/checkout@v4
     

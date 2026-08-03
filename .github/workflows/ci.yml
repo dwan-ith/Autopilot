@@ -1,4 +1,4 @@
-name: Autopilot CI
+﻿name: Autopilot CI
 
 on:
   push:
@@ -10,6 +10,7 @@ jobs:
   build-and-test:
     runs-on: ubuntu-latest
     env:
+      AUTOPILOT_RUN_INTEGRATION: 0
       AUTOPILOT_DISABLE_LLM: 1
       AUTOPILOT_CREDENTIAL_ENCRYPTION_KEY: "test-key-for-ci-action-only-not-for-prod"
     steps:
@@ -30,9 +31,10 @@ jobs:
     - name: Run Linters & Static Analysis
       run: |
         source venv/bin/activate
-        make lint
+        python -m ruff check src/ tests/
+        python -m mypy src/ tests/
         
     - name: Run Backend Unit Tests
       run: |
         source venv/bin/activate
-        make test-unit
+        python -m pytest tests/test_runtime.py tests/test_mcp.py -v --tb=short

@@ -30,6 +30,23 @@ class PolicyEngine:
         self.high_risk_requires_human = high_risk_requires_human
         self.auto_approve_validation = os.getenv("AUTOPILOT_AUTO_APPROVE_ACTIONS", "").lower() in {"1", "true", "yes"}
 
+    def decide_operator(self, mission: Mission, connector: Connector, action: str) -> PolicyDecision:
+        """Policy for authenticated operator-initiated requests.
+
+        The API call itself is a human decision, so it satisfies the
+        post-execution validation requirement — but every other gate
+        (connector capability surface, confidence threshold, and the
+        HIGH-risk human-approval rule) still applies. HIGH-risk actions
+        therefore remain blocked here and must go through the approval
+        queue; there is no flag that waives that.
+        """
+        original = self.auto_approve_validation
+        self.auto_approve_validation = True
+        try:
+            return self.decide(mission, connector, action)
+        finally:
+            self.auto_approve_validation = original
+
     def decide(self, mission: Mission, connector: Connector, action: str) -> PolicyDecision:
         risk, required, requires_validation = self.ACTION_RULES.get(action, (ActionRisk.HIGH, 0.85, True))
 

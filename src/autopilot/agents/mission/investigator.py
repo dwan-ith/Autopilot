@@ -17,6 +17,7 @@ from __future__ import annotations
 import logging
 
 from autopilot.agents.base import AgentResult, Orchestrator, Tool
+from autopilot.agents.validation import clamp, safe_confidence
 from autopilot.models import (
     AgentRun,
     Evidence,
@@ -124,7 +125,7 @@ class InvestigatorAgent:
             tool_calls=agent_result.tool_calls_made,
             output_summary=str(agent_result.answer.get("assessment", ""))[:500]
                 if isinstance(agent_result.answer, dict) else "",
-            confidence=float(agent_result.answer.get("confidence", 0.0))
+            confidence=safe_confidence(agent_result.answer.get("confidence"), default=0.0)
                 if isinstance(agent_result.answer, dict) else 0.0,
             duration_ms=agent_result.total_duration_ms,
             error=agent_result.error,
@@ -174,12 +175,13 @@ class InvestigatorAgent:
         if isinstance(evidence_data, list):
             for item in evidence_data:
                 if isinstance(item, dict):
+                    url = item.get("url")
                     gathered.append(Evidence(
-                        source=item.get("source", "investigator"),
+                        source=str(item.get("source", "investigator")),
                         title=str(item.get("title", "Evidence")),
                         summary=str(item.get("summary", ""))[:500],
-                        url=item.get("url"),
-                        confidence=float(item.get("confidence", 0.5)),
+                        url=str(url) if isinstance(url, str) and url else None,
+                        confidence=safe_confidence(item.get("confidence"), default=0.5),
                         metadata={"agent_id": agent_result.agent_id, "hypothesis": hyp.title},
                     ))
 
@@ -197,8 +199,13 @@ class InvestigatorAgent:
         hyp.evidence_ids.extend(e.id for e in new_evidence)
 
         if gathered:
-            reported_conf = float(agent_result.answer.get("confidence", 0.5)) if isinstance(agent_result.answer, dict) else 0.5
-            hyp.confidence = round(min(0.93, reported_conf * 0.8 + len(new_evidence) * 0.04), 2)
+            reported_conf = (
+                safe_confidence(agent_result.answer.get("confidence"), default=0.5)
+                if isinstance(agent_result.answer, dict) else 0.5
+            )
+            # Evidence-count bonus is capped: many weak items must not
+            # mechanically manufacture high confidence.
+            hyp.confidence = round(clamp(reported_conf * 0.8 + min(len(new_evidence), 4) * 0.04, 0.0, 0.93), 2)
             log.info(
                 "Investigator: '%s' → confidence=%.2f, evidence=%d, tool_calls=%d",
                 hyp.title, hyp.confidence, len(new_evidence), agent_result.tool_calls_made,

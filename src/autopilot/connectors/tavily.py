@@ -105,14 +105,20 @@ class TavilyConnector(Connector):
         results: list[Evidence] = []
         results.extend(await self._ddg_search(query))
         results.extend(await self._hn_search(query))
-        if not results:
-            results.append(Evidence(
+        real = [r for r in results if r.metadata.get("kind") != "tool_error"]
+        errors = [r for r in results if r.metadata.get("kind") == "tool_error"]
+        if not real and errors:
+            # Surface provider failures honestly instead of masking them as
+            # "no results found".
+            return errors[:6]
+        if not real:
+            results = [Evidence(
                 source="web_search",
                 title="No results found",
                 summary=f"No results found for '{query[:80]}'. Set TAVILY_API_KEY for reliable web search.",
                 confidence=0.1,
                 metadata={"mode": "duckduckgo+hackernews", "ddg_available": _ddg_available},
-            ))
+            )]
         return results[:6]
 
     async def _tavily_search(self, query: str) -> list[Evidence]:
@@ -141,17 +147,21 @@ class TavilyConnector(Connector):
                         metadata={"mode": "tavily_ai"},
                     ))
                 for item in data.get("results", []):
+                    try:
+                        score = min(max(float(item.get("score", 0.5)), 0.0), 1.0)
+                    except (TypeError, ValueError):
+                        score = 0.5
                     results.append(Evidence(
                         source="tavily",
                         title=item.get("title", "Web result"),
                         summary=item.get("content", "")[:300],
                         url=item.get("url", ""),
-                        confidence=min(item.get("score", 0.5), 1.0),
+                        confidence=score,
                         metadata={"mode": "tavily_ai"},
                     ))
                 return results
         except Exception as e:
-            return [Evidence(source="tavily", title="Tavily search failed", summary=str(e), confidence=0.0)]
+            return [Evidence(source="tavily", title="Tavily search failed", summary=str(e), confidence=0.0, metadata={"kind": "tool_error"})]
 
     async def _ddg_search(self, query: str) -> list[Evidence]:
         """DuckDuckGo Instant Answer API — no key required."""
@@ -164,8 +174,14 @@ class TavilyConnector(Connector):
                 )
                 resp.raise_for_status()
                 data = resp.json()
-        except Exception:
-            return []
+        except (httpx.HTTPError, json.JSONDecodeError, KeyError, ValueError):
+            return [Evidence(
+                source="duckduckgo",
+                title="DuckDuckGo search unavailable",
+                summary=f"DDG instant-answer lookup failed for '{query[:80]}'",
+                confidence=0.0,
+                metadata={"kind": "tool_error", "mode": "ddg_instant_answer"},
+            )]
 
         results: list[Evidence] = []
 
@@ -205,8 +221,14 @@ class TavilyConnector(Connector):
                 )
                 resp.raise_for_status()
                 data = resp.json()
-        except (httpx.RequestError, httpx.HTTPStatusError, json.JSONDecodeError, KeyError, ValueError):
-            return []
+        except (httpx.HTTPError, json.JSONDecodeError, KeyError, ValueError):
+            return [Evidence(
+                source="hackernews",
+                title="Hacker News search unavailable",
+                summary=f"HN lookup failed for '{query[:80]}'",
+                confidence=0.0,
+                metadata={"kind": "tool_error", "mode": "hn_search"},
+            )]
 
         results: list[Evidence] = []
         for hit in data.get("hits", []):

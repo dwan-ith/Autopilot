@@ -14,6 +14,7 @@ import logging
 from typing import Any
 
 from autopilot.agents.base import AgentResult, PersistentAgent, SubAgent
+from autopilot.agents.validation import safe_severity, safe_str_list, severity_at_least
 from autopilot.models import Mission, Signal
 
 log = logging.getLogger("autopilot.agents.correlator")
@@ -89,6 +90,11 @@ class CorrelatorAgent(PersistentAgent):
 
         r = result.answer
         if isinstance(r, dict) and "severity" in r:
+            # Canonicalize LLM output so downstream severity comparisons
+            # ("banana", "SEV1", "High"…) can't silently route incidents
+            # down the low-severity path.
+            r["severity"] = safe_severity(r.get("severity"))
+            r["key_entities"] = safe_str_list(r.get("key_entities"))
             return r
 
         # Heuristic fallback
@@ -100,7 +106,7 @@ class CorrelatorAgent(PersistentAgent):
                 correlated_id = m.id
                 break
 
-        high_urgency = signal.urgency.lower() in {"urgent", "high", "critical", "p0", "p1"}
+        high_urgency = severity_at_least(signal.urgency, "high")
         return {
             "severity": "high" if high_urgency else "medium",
             "impact_summary": signal.summary,

@@ -26,6 +26,8 @@ DATA_DIR = ROOT / "data"
 ARTIFACT_DIR = ROOT / "artifacts"
 DB_PATH = DATA_DIR / "autopilot.db"
 
+_TERMINAL_STATUSES = {MissionStatus.COMPLETE, MissionStatus.FAILED, MissionStatus.CANCELED}
+
 
 def _json_default(value: Any) -> str:
     if isinstance(value, datetime):
@@ -185,12 +187,22 @@ class Store:
             conn.execute(f"alter table {table} add column {column} {ddl}")
 
     def save_signal(self, signal: Signal, mission_id: str | None = None) -> None:
+        """Persist a signal.
+
+        Re-saving the same signal id updates its mission linkage; saving a
+        *different* signal whose idempotency key already exists raises
+        sqlite3.IntegrityError so callers can treat it as a duplicate instead
+        of silently overwriting the original (INSERT OR REPLACE used to do
+        exactly that, defeating the unique index and racing two ingests of
+        the same event into two separate missions).
+        """
         with self._lock, closing(self.connect()) as conn, conn:
             conn.execute(
                 """
-                insert or replace into signals
+                insert into signals
                 (id, mission_id, source, type, summary, entities, urgency, idempotency_key, payload, received_at)
                 values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                on conflict(id) do update set mission_id=excluded.mission_id
                 """,
                 (
                     signal.id,
@@ -223,6 +235,17 @@ class Store:
         with self._lock:
             existing = self.get_mission(mission.id)
             if existing:
+                # Terminal states are sticky: a stale RUNNING snapshot held by
+                # a slow runner must never resurrect a canceled/failed/complete
+                # mission (the runner's next write would otherwise flip the
+                # status back and orphan the cancellation).
+                if (
+                    existing.status in _TERMINAL_STATUSES
+                    and mission.status not in _TERMINAL_STATUSES
+                ):
+                    mission.status = existing.status
+                    if existing.completed_at and not mission.completed_at:
+                        mission.completed_at = existing.completed_at
                 mission.signals = self._merge_by_id(mission.signals, existing.signals)
                 mission.hypotheses = self._merge_by_id(mission.hypotheses, existing.hypotheses)
                 mission.evidence = self._merge_by_id(mission.evidence, existing.evidence)
@@ -293,7 +316,7 @@ class Store:
             return None
         return Mission.model_validate_json(row["payload"])
 
-    
+
     def count_missions(self) -> int:
         with self._lock, closing(self.connect()) as conn, conn:
             row = conn.execute('SELECT COUNT(*) as count FROM missions').fetchone()
@@ -303,6 +326,92 @@ class Store:
         with self._lock, closing(self.connect()) as conn, conn:
             row = conn.execute('SELECT COUNT(*) as count FROM trace_events').fetchone()
         return row['count'] if row else 0
+
+    def stream_version(self) -> str:
+        """Cheap fingerprint of mutable state for SSE change detection.
+
+        Every mission write bumps MAX(updated_at) or the row count; trace_events
+        is append-only so its row count is a sufficient signature. This lets the
+        event stream skip re-serializing the whole database every poll."""
+        with self._lock, closing(self.connect()) as conn, conn:
+            m = conn.execute(
+                "select (select count(*) from missions) || ':' || ifnull(max(updated_at), '') from missions"
+            ).fetchone()
+            t = conn.execute("select (select count(*) from trace_events) || ':' || "
+                             "(select count(*) from signals)").fetchone()
+        return f"{m[0] or ''}|{t[0] or ''}"
+
+    def mission_stats(self) -> dict:
+        """Aggregate mission statistics: counts by status, avg confidence, replan rate."""
+        missions = self._all_missions()
+        if not missions:
+            return {"total": 0, "by_status": {}, "avg_confidence": 0.0, "avg_replans": 0.0, "avg_evidence": 0.0}
+
+        by_status: dict[str, int] = {}
+        total_conf = 0.0
+        total_replans = 0
+        total_evidence = 0
+        for m in missions:
+            by_status[m.status.value] = by_status.get(m.status.value, 0) + 1
+            total_conf += m.confidence
+            total_replans += m.replans
+            total_evidence += len(m.evidence)
+
+        n = len(missions)
+        return {
+            "total": n,
+            "by_status": by_status,
+            "avg_confidence": round(total_conf / n, 3),
+            "avg_replans": round(total_replans / n, 2),
+            "avg_evidence": round(total_evidence / n, 2),
+        }
+
+    def agent_performance(self) -> list[dict]:
+        """Per-role agent metrics: call count, avg tool calls, avg confidence, failure rate."""
+        missions = self._all_missions()
+        roles: dict[str, dict] = {}
+        for m in missions:
+            for run in m.agent_runs:
+                role = run.role
+                if role not in roles:
+                    roles[role] = {"role": role, "runs": 0, "total_tool_calls": 0, "total_conf": 0.0, "failures": 0, "total_duration_ms": 0.0}
+                bucket = roles[role]
+                bucket["runs"] += 1
+                bucket["total_tool_calls"] += run.tool_calls
+                bucket["total_conf"] += run.confidence
+                bucket["total_duration_ms"] += run.duration_ms
+                if run.status.value == "failed":
+                    bucket["failures"] += 1
+
+        result = []
+        for bucket in roles.values():
+            n = bucket["runs"]
+            result.append({
+                "role": bucket["role"],
+                "total_runs": n,
+                "avg_tool_calls": round(bucket["total_tool_calls"] / n, 1) if n else 0,
+                "avg_confidence": round(bucket["total_conf"] / n, 3) if n else 0,
+                "failure_rate": round(bucket["failures"] / n, 3) if n else 0,
+                "avg_duration_ms": round(bucket["total_duration_ms"] / n, 1) if n else 0,
+            })
+        return sorted(result, key=lambda r: r["total_runs"], reverse=True)
+
+    def connector_health(self) -> list[dict]:
+        """Per-connector action health: total actions, success/fail/skip counts."""
+        missions = self._all_missions()
+        connectors: dict[str, dict] = {}
+        for m in missions:
+            for action in m.actions:
+                name = action.connector
+                if name not in connectors:
+                    connectors[name] = {"connector": name, "total": 0, "complete": 0, "failed": 0, "skipped": 0, "blocked": 0}
+                bucket = connectors[name]
+                bucket["total"] += 1
+                status = action.status
+                if status in bucket:
+                    bucket[status] += 1
+
+        return sorted(connectors.values(), key=lambda c: c["total"], reverse=True)
 
     def list_missions(self, limit: int = 50) -> list[dict[str, Any]]:
         with self._lock, closing(self.connect()) as conn, conn:
@@ -425,6 +534,26 @@ class Store:
                 rows = conn.execute("select * from trace_events order by id desc limit ?", (limit,)).fetchall()
         return [dict(row) for row in rows]
 
+    def prune_stale_traces(self, days: int = 7) -> int:
+        """Delete trace events older than `days`; returns the number removed.
+
+        Without this retention pass the trace table grows without bound and
+        every dashboard/metrics query slows with it. Also trims orphaned
+        signals that were never attached to a persisted mission.
+        """
+        cutoff_days = f"-{int(days)} days"
+        with self._lock, closing(self.connect()) as conn, conn:
+            cursor = conn.execute(
+                """
+                delete from trace_events
+                where created_at < datetime('now', ?)
+                """,
+                (cutoff_days,),
+            )
+            deleted = cursor.rowcount if cursor.rowcount and cursor.rowcount > 0 else 0
+            self._maybe_checkpoint(conn)
+        return deleted
+
     def remember(self, key: str, value: str) -> None:
         with self._lock, closing(self.connect()) as conn, conn:
             conn.execute(
@@ -515,80 +644,10 @@ class Store:
 
 
 class StateStore(Store):
-    """Shared durable mission state for orchestrator, agents, traces, and analytics.
+    """Backwards-compatible alias for the shared mission store.
 
-    Extends Store with analytics read methods for dashboards and reporting.
+    The analytics read methods (mission_stats, agent_performance,
+    connector_health) live on Store itself so any injected store instance —
+    including test doubles and scoped reads — serves dashboards identically.
     """
-
-    def mission_stats(self) -> dict:
-        """Aggregate mission statistics: counts by status, avg confidence, replan rate."""
-        missions = self._all_missions()
-        if not missions:
-            return {"total": 0, "by_status": {}, "avg_confidence": 0.0, "avg_replans": 0.0, "avg_evidence": 0.0}
-
-        by_status: dict[str, int] = {}
-        total_conf = 0.0
-        total_replans = 0
-        total_evidence = 0
-        for m in missions:
-            by_status[m.status.value] = by_status.get(m.status.value, 0) + 1
-            total_conf += m.confidence
-            total_replans += m.replans
-            total_evidence += len(m.evidence)
-
-        n = len(missions)
-        return {
-            "total": n,
-            "by_status": by_status,
-            "avg_confidence": round(total_conf / n, 3),
-            "avg_replans": round(total_replans / n, 2),
-            "avg_evidence": round(total_evidence / n, 2),
-        }
-
-    def agent_performance(self) -> list[dict]:
-        """Per-role agent metrics: call count, avg tool calls, avg confidence, failure rate."""
-        missions = self._all_missions()
-        roles: dict[str, dict] = {}
-        for m in missions:
-            for run in m.agent_runs:
-                role = run.role
-                if role not in roles:
-                    roles[role] = {"role": role, "runs": 0, "total_tool_calls": 0, "total_conf": 0.0, "failures": 0, "total_duration_ms": 0.0}
-                bucket = roles[role]
-                bucket["runs"] += 1
-                bucket["total_tool_calls"] += run.tool_calls
-                bucket["total_conf"] += run.confidence
-                bucket["total_duration_ms"] += run.duration_ms
-                if run.status.value == "failed":
-                    bucket["failures"] += 1
-
-        result = []
-        for bucket in roles.values():
-            n = bucket["runs"]
-            result.append({
-                "role": bucket["role"],
-                "total_runs": n,
-                "avg_tool_calls": round(bucket["total_tool_calls"] / n, 1) if n else 0,
-                "avg_confidence": round(bucket["total_conf"] / n, 3) if n else 0,
-                "failure_rate": round(bucket["failures"] / n, 3) if n else 0,
-                "avg_duration_ms": round(bucket["total_duration_ms"] / n, 1) if n else 0,
-            })
-        return sorted(result, key=lambda r: r["total_runs"], reverse=True)
-
-    def connector_health(self) -> list[dict]:
-        """Per-connector action health: total actions, success/fail/skip counts."""
-        missions = self._all_missions()
-        connectors: dict[str, dict] = {}
-        for m in missions:
-            for action in m.actions:
-                name = action.connector
-                if name not in connectors:
-                    connectors[name] = {"connector": name, "total": 0, "complete": 0, "failed": 0, "skipped": 0, "blocked": 0}
-                bucket = connectors[name]
-                bucket["total"] += 1
-                status = action.status
-                if status in bucket:
-                    bucket[status] += 1
-
-        return sorted(connectors.values(), key=lambda c: c["total"], reverse=True)
 

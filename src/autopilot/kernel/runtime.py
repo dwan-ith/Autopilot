@@ -19,11 +19,13 @@ import json
 import logging
 import os
 import secrets
+import sqlite3
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from typing import Any
 
 from autopilot.agents.persistent.memory import MemoryAgent
+from autopilot.agents.validation import safe_severity
 from autopilot.connectors.base import ConnectorRegistry
 from autopilot.models import (
     Capability,
@@ -94,49 +96,73 @@ class RuntimeKernel:
         if corr_id:
             mission = self.store.get_mission(corr_id)
             if mission:
-                mission.signals.append(signal)
-                pl = signal.payload.get("pipeline")
-                if isinstance(pl, dict):
-                    mission.pipeline.update(pl)
-                mission.graph.append(MissionGraphNode(
+                # Mutating an existing mission must hold the same lock the
+                # mission task uses, or concurrent writers clobber each
+                # other's scalar fields (summary/confidence/status).
+                lock = self._mission_locks.setdefault(mission.id, asyncio.Lock())
+                async with lock:
+                    fresh = self.store.get_mission(mission.id)
+                    if not fresh:
+                        return mission
+                    fresh.signals.append(signal)
+                    pl = signal.payload.get("pipeline")
+                    if isinstance(pl, dict):
+                        fresh.pipeline.update(pl)
+                    fresh.graph.append(MissionGraphNode(
+                        kind=GraphNodeKind.SIGNAL,
+                        title=f"Correlated signal: {signal.type}",
+                        status=StepStatus.COMPLETE,
+                        summary=signal.summary,
+                        ref_id=signal.id,
+                        completed_at=utc_now(),
+                        metadata={"source": signal.source, "entities": signal.entities},
+                    ))
+                    if fresh.status != MissionStatus.WAITING and fresh.status not in (
+                        MissionStatus.COMPLETE, MissionStatus.FAILED, MissionStatus.CANCELED
+                    ):
+                        fresh.status = MissionStatus.RUNNING
+                    self.store.update_mission(fresh)
+                    self.store.save_signal(signal, fresh.id)
+                    self.tracer.emit(fresh.id, "signal.correlated", "complete", {"signal": signal.model_dump()})
+                    mission_id = fresh.id
+                self.schedule(mission_id)
+                return self.store.get_mission(mission_id) or mission
+
+        # New mission. The unique index on signals.idempotency_key is the
+        # authoritative dedup guard: two concurrent ingests of the same event
+        # both pass the pre-check above, but only one insert wins.
+        try:
+            pl_seed = signal.payload.get("pipeline")
+            pipe: dict[str, Any] = dict(pl_seed) if isinstance(pl_seed, dict) else {}
+            mission = Mission(
+                title=self._title_for(signal),
+                status=MissionStatus.QUEUED,
+                severity=safe_severity(
+                    corr_info.get("severity", signal.urgency) if isinstance(corr_info, dict) else signal.urgency
+                ),
+                summary=corr_info.get("impact_summary", signal.summary) if isinstance(corr_info, dict) else signal.summary,
+                signals=[signal],
+                pipeline=pipe,
+                graph=[MissionGraphNode(
                     kind=GraphNodeKind.SIGNAL,
-                    title=f"Correlated signal: {signal.type}",
+                    title=f"Initial signal: {signal.type}",
                     status=StepStatus.COMPLETE,
                     summary=signal.summary,
                     ref_id=signal.id,
                     completed_at=utc_now(),
                     metadata={"source": signal.source, "entities": signal.entities},
-                ))
-                if mission.status != MissionStatus.WAITING:
-                    mission.status = MissionStatus.RUNNING
-                mission.summary = f"Correlated new {signal.type} signal into existing mission."
-                self.store.update_mission(mission)
-                self.store.save_signal(signal, mission.id)
-                self.tracer.emit(mission.id, "signal.correlated", "complete", {"signal": signal.model_dump()})
-                self.schedule(mission.id)
-                return mission
-
-        # New mission
-        pl_seed = signal.payload.get("pipeline")
-        pipe: dict[str, Any] = dict(pl_seed) if isinstance(pl_seed, dict) else {}
-        mission = Mission(
-            title=self._title_for(signal),
-            status=MissionStatus.QUEUED,
-            severity=corr_info.get("severity", signal.urgency) if isinstance(corr_info, dict) else signal.urgency,
-            summary=corr_info.get("impact_summary", signal.summary) if isinstance(corr_info, dict) else signal.summary,
-            signals=[signal],
-            pipeline=pipe,
-            graph=[MissionGraphNode(
-                kind=GraphNodeKind.SIGNAL,
-                title=f"Initial signal: {signal.type}",
-                status=StepStatus.COMPLETE,
-                summary=signal.summary,
-                ref_id=signal.id,
-                completed_at=utc_now(),
-                metadata={"source": signal.source, "entities": signal.entities},
-            )],
-        )
-        self.store.create_mission(mission)
+                )],
+            )
+            self.store.create_mission(mission)
+        except sqlite3.IntegrityError:
+            existing = self.store.mission_for_signal_key(signal.idempotency_key)
+            if existing:
+                self.tracer.emit(
+                    existing.id, "signal.duplicate", "complete",
+                    {"signal": signal.model_dump(), "idempotency_key": signal.idempotency_key},
+                )
+                return existing
+            raise
         self.store.save_signal(signal, mission.id)
         self.tracer.emit(mission.id, "mission.created", "complete", {"signal": signal.model_dump()})
         self.schedule(mission.id)
@@ -187,8 +213,17 @@ class RuntimeKernel:
         return True
 
     def cancel(self, mission_id: str, reason: str = "Canceled by operator request") -> bool:
+        """Cancel a mission. Only non-terminal missions can be canceled;
+        canceling a COMPLETE/FAILED/CANCELED mission is refused (returns
+        False) instead of silently rewriting history."""
         mission = self.store.get_mission(mission_id)
         if not mission:
+            return False
+        if mission.status in {MissionStatus.COMPLETE, MissionStatus.FAILED, MissionStatus.CANCELED}:
+            self.tracer.emit(
+                mission_id, "mission.cancel_refused", "skipped",
+                {"reason": reason, "status": mission.status.value},
+            )
             return False
         mission.status = MissionStatus.CANCELED
         mission.summary = reason
@@ -233,6 +268,16 @@ class RuntimeKernel:
                 self.tracer.emit(mission_id, "mission.timeout", "failed", {"timeout_seconds": timeout})
         return self.store.get_mission(mission_id)
 
+    def _raise_if_canceled(self, mission_id: str) -> None:
+        """Stop mid-flight when an operator canceled this mission.
+
+        Without phase-boundary checks a canceled mission kept running to
+        completion — and its next snapshot write flipped the status back
+        over the cancellation."""
+        fresh = self.store.get_mission(mission_id)
+        if fresh and fresh.status == MissionStatus.CANCELED:
+            raise asyncio.CancelledError
+
     async def _run_mission_locked(self, mission_id: str) -> None:
         mission = self.store.get_mission(mission_id)
         if not mission or mission.status == MissionStatus.CANCELED:
@@ -267,6 +312,7 @@ class RuntimeKernel:
 
             # Correlation window — allow more signals to arrive
             await asyncio.sleep(self.correlation_window_seconds)
+            self._raise_if_canceled(mission_id)
             mission = self.store.get_mission(mission_id) or mission
 
             # ── STEP 1: Memory recall ─────────────────────────────────────
@@ -275,6 +321,7 @@ class RuntimeKernel:
                 mission.memory_notes = memory_ctx.get("relevant_patterns", [])
                 step.output_summary = memory_ctx.get("notes", "No prior context.")
                 self.store.update_mission(mission)
+            self._raise_if_canceled(mission_id)
 
             # ── STEP 2: Correlator / Signal Evaluation ────────────────────
             async with self.step(mission, "Correlator", "classify severity, entities, investigation focus") as step:
@@ -282,6 +329,7 @@ class RuntimeKernel:
                 mission = await self.operators.evaluate_signal(mission, active)
                 step.output_summary = mission.summary
                 self.store.update_mission(mission)
+            self._raise_if_canceled(mission_id)
 
             # ── STEP 3: Planner ───────────────────────────────────────────
             async with self.step(mission, "Planner", "generate competing hypotheses with search focus") as step:
@@ -290,6 +338,7 @@ class RuntimeKernel:
                 step.metadata = {"hypotheses": [h.model_dump() for h in mission.hypotheses]}
                 self._append_hypothesis_nodes(mission)
                 self.store.update_mission(mission)
+            self._raise_if_canceled(mission_id)
 
             # ── STEP 4: Investigator (parallel subagents) ─────────────────
             async with self.step(mission, "Investigator Swarm", "parallel evidence-gathering across hypothesis branches") as step:
@@ -302,6 +351,7 @@ class RuntimeKernel:
                 }
                 self._append_branch_nodes(mission)
                 self.store.update_mission(mission)
+            self._raise_if_canceled(mission_id)
 
             # Re-correlate if more signals arrived during investigation
             mission = self.store.get_mission(mission_id) or mission
@@ -340,6 +390,7 @@ class RuntimeKernel:
                     step.output_summary = f"Post-replan confidence={mission.confidence:.2f}."
                     step.metadata = {"confidence": mission.confidence, "evidence_count": len(mission.evidence)}
                     self.store.update_mission(mission)
+            self._raise_if_canceled(mission_id)
 
             # ── STEP 6: Reflection (cross-branch synthesis) ───────────────
             async with self.step(mission, "Reflection", "synthesize evidence, gaps, readiness for delivery") as step:
@@ -348,6 +399,7 @@ class RuntimeKernel:
                 step.output_summary = str(ref.get("reflection", ""))[:500]
                 step.metadata = {"reflection": ref}
                 self.store.update_mission(mission)
+            self._raise_if_canceled(mission_id)
 
             mission = self.store.get_mission(mission_id) or mission
             if mission.pipeline.get("defer_delivery"):
@@ -381,6 +433,7 @@ class RuntimeKernel:
 
     async def _complete_delivery_phases(self, mission_id: str) -> None:
         """Executor, policy-gated actions, validation, mission completion."""
+        self._raise_if_canceled(mission_id)
         mission = self.store.get_mission(mission_id)
         if not mission:
             return
@@ -408,6 +461,8 @@ class RuntimeKernel:
             self._append_action_nodes(mission)
 
         mission = self.store.get_mission(mission_id) or mission
+        if mission.status == MissionStatus.CANCELED:
+            return
         mission.status = MissionStatus.COMPLETE
         mission.completed_at = utc_now()
         mission.pipeline.pop("delivery_pending", None)

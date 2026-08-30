@@ -13,6 +13,7 @@ from __future__ import annotations
 import logging
 
 from autopilot.agents.base import AgentResult, SubAgent, Tool
+from autopilot.agents.validation import clamp
 from autopilot.models import Mission
 
 log = logging.getLogger("autopilot.agents.reflection")
@@ -94,12 +95,12 @@ class ReflectionAgent:
                     + (f" | Next: {next_step}" if next_step else "")
                 )
 
-            if isinstance(adj_conf, (int, float)) and 0.0 <= adj_conf <= 1.0:
+            if isinstance(adj_conf, (int, float)) and not isinstance(adj_conf, bool):
                 # Weighted blend: 60% prior, 40% reflection.
                 # Using a blend (not max) so reflection can LOWER confidence
                 # when it finds contradictions — avoiding a one-way ratchet.
-                blended = 0.6 * mission.confidence + 0.4 * float(adj_conf)
-                mission.confidence = round(min(0.96, max(0.1, blended)), 2)
+                blended = 0.6 * mission.confidence + 0.4 * clamp(float(adj_conf))
+                mission.confidence = round(clamp(blended, 0.1, 0.96), 2)
 
             log.info(
                 "ReflectionAgent: root_cause=%.80s confidence=%.2f",

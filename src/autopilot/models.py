@@ -47,6 +47,7 @@ class ActionRisk(str, Enum):
 
 class ApprovalStatus(str, Enum):
     PENDING = "pending"
+    EXECUTING = "executing"
     EXECUTED = "executed"
     REJECTED = "rejected"
     FAILED = "failed"

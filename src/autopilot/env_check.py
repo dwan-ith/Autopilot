@@ -23,6 +23,20 @@ def validate_env() -> None:
         if missing:
             raise OSError(f"CRITICAL: Missing required environment variables in production: {', '.join(missing)}")
 
+    # Binding beyond loopback without an API key exposes every endpoint —
+    # including action approval, mission cancel, and webhook ingest — to the
+    # whole network. Refuse in production, warn loudly otherwise.
+    host = os.getenv("AUTOPILOT_HOST", "127.0.0.1").strip().lower()
+    exposed = host not in {"127.0.0.1", "localhost", "::1"}
+    if exposed and not os.getenv("AUTOPILOT_API_KEY", "").strip():
+        msg = (
+            f"AUTOPILOT_HOST={host} binds beyond loopback but AUTOPILOT_API_KEY is unset: "
+            "every endpoint accepts unauthenticated requests."
+        )
+        if is_prod:
+            raise OSError(f"CRITICAL: {msg}")
+        log.warning("STARTUP: %s Set AUTOPILOT_API_KEY before exposing this service.", msg)
+
     # Log warnings for optionals
     warnings = []
     for key, reason in optional:

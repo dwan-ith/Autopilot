@@ -2,8 +2,11 @@
 
 Enforces action boundaries. Every connector action must pass through the
 Governor before execution. Unlike the raw PolicyEngine (which is pure rule-
-based), the Governor applies LLM reasoning to ambiguous cases and can
-escalate novel situations for human review.
+based), the Governor applies LLM reasoning to ambiguous cases — but the LLM
+can only *escalate* a decision (attach an endorsement and/or route it to the
+human approval queue). It can never convert a policy block into autonomous
+execution; `PolicyDecision.allowed=True` originates exclusively from the
+deterministic engine.
 
 Uses the Groq-3 slot (fast) since policy checks are on the hot path.
 """
@@ -54,63 +57,54 @@ class GovernorAgent(PersistentAgent):
         return _SYSTEM
 
     def decide(self, mission: Mission, connector: Connector, action: str) -> PolicyDecision:
-        """Run the deterministic policy first; LLM reasoning for ambiguous cases.
-
-        The LLM path is only invoked when the deterministic policy would
-        normally block but confidence is borderline (within 0.10 of threshold).
-        This avoids unnecessary LLM calls for clear-allow / clear-block cases.
-        """
-        decision = self._policy.decide(mission, connector, action)
-        return decision
+        """Deterministic policy only. The sync path never consults an LLM."""
+        return self._policy.decide(mission, connector, action)
 
     async def decide_async(self, mission: Mission, connector: Connector, action: str) -> PolicyDecision:
-        """Async variant — uses LLM for borderline decisions."""
+        """Async variant — LLM review for borderline cases, escalation-only.
+
+        Invariant: if the deterministic engine did not allow autonomous
+        execution, the returned decision also has allowed=False. An LLM
+        "allow" verdict on a blocked-but-borderline action becomes a
+        human-approval queue entry carrying the endorsement, so only an
+        explicit operator decision can release the side effect.
+        """
         decision = self._policy.decide(mission, connector, action)
+        if decision.allowed:
+            return decision
 
         _, required, requires_validation = PolicyEngine.ACTION_RULES.get(
             action, (ActionRisk.HIGH, 0.85, True)
         )
         borderline = (
-            not decision.allowed
-            and abs(mission.confidence - required) <= 0.12
+            abs(mission.confidence - required) <= 0.12
             and mission.confidence >= required * 0.85
         )
 
         if borderline and action in connector.manifest.safe_actions:
             r = await self._llm_review(mission, connector, action)
-            if isinstance(r, dict):
-                llm_decision = r.get("decision", "block")
-                if llm_decision == "allow":
-                    log.info(
-                        "Governor: LLM overrode policy block for %s.%s (confidence=%.2f)",
-                        connector.manifest.name, action, mission.confidence,
-                    )
-                    return PolicyDecision(
-                        connector=connector.manifest.name,
-                        action=action,
-                        allowed=True,
-                        reason=f"Governor LLM review approved (borderline case): {r.get('reason', '')}",
-                        risk=decision.risk,
-                        requires_validation=True,
-                        confidence_required=required,
-                        confidence_observed=mission.confidence,
-                    )
-                elif llm_decision == "hold":
-                    log.info(
-                        "Governor: LLM recommends hold for %s.%s — routing to approval queue",
-                        connector.manifest.name, action,
-                    )
-                    return PolicyDecision(
-                        connector=connector.manifest.name,
-                        action=action,
-                        allowed=False,
-                        reason=f"Governor LLM review: hold for human approval. {r.get('reason', '')}",
-                        risk=decision.risk,
-                        requires_validation=True,
-                        confidence_required=required,
-                        confidence_observed=mission.confidence,
-                    )
-                # "block" falls through to return the original deterministic decision
+            llm_decision = str(r.get("decision", "block")).lower() if isinstance(r, dict) else "block"
+            if llm_decision in {"allow", "hold"}:
+                endorsed = "endorsed" if llm_decision == "allow" else "not endorsed"
+                log.info(
+                    "Governor: LLM review %s for %s.%s (confidence=%.2f) — routing to human approval queue",
+                    endorsed, connector.manifest.name, action, mission.confidence,
+                )
+                return PolicyDecision(
+                    connector=connector.manifest.name,
+                    action=action,
+                    allowed=False,
+                    reason=(
+                        f"Borderline confidence ({mission.confidence:.2f} vs required {required:.2f}); "
+                        f"Governor LLM review {endorsed} the action. Queued for human approval. "
+                        f"{r.get('reason', '')}"
+                    ).strip(),
+                    risk=decision.risk,
+                    requires_validation=True,
+                    confidence_required=required,
+                    confidence_observed=mission.confidence,
+                )
+            # "block" or unparsable review — deterministic decision stands.
 
         return decision
 

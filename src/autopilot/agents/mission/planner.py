@@ -13,6 +13,7 @@ from __future__ import annotations
 import logging
 
 from autopilot.agents.base import AgentResult, SubAgent, Tool
+from autopilot.agents.validation import safe_confidence
 from autopilot.models import Hypothesis, Mission
 
 log = logging.getLogger("autopilot.agents.planner")
@@ -79,7 +80,7 @@ class PlannerAgent:
                 Hypothesis(
                     title=str(item.get("title", "Unnamed")),
                     rationale=str(item.get("rationale", "")),
-                    confidence=float(item.get("initial_confidence", 0.35)),
+                    confidence=safe_confidence(item.get("initial_confidence"), default=0.35),
                     search_focus=str(item.get("search_focus", item.get("title", ""))),
                 )
                 for item in hypotheses_data

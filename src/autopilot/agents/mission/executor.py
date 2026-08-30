@@ -20,6 +20,7 @@ from datetime import UTC
 from typing import Any
 
 from autopilot.agents.base import AgentResult, SubAgent
+from autopilot.agents.validation import safe_int, severity_at_least
 from autopilot.connectors.base import Connector
 from autopilot.models import Mission
 
@@ -113,7 +114,7 @@ class ExecutorAgent:
                 ]
                 if valid:
                     log.info("Executor: LLM generated %d-step execution plan", len(valid))
-                    return sorted(valid, key=lambda s: int(s.get("priority", 99)))
+                    return sorted(valid, key=lambda s: safe_int(s.get("priority"), default=99, lo=1, hi=999))
 
         log.info("Executor: falling back to heuristic execution plan")
         return self._heuristic_plan(mission, available_connectors)
@@ -131,7 +132,7 @@ class ExecutorAgent:
         # Keep known production connectors in a stable order, then include any
         # other registered issue connector so custom integrations are not
         # silently ignored when the LLM planner is disabled or unavailable.
-        if mission.severity in {"critical", "high"}:
+        if severity_at_least(mission.severity, "high"):
             order = [
                 ("notification", "notify_ops", 1),
                 ("github", "create_issue", 2),

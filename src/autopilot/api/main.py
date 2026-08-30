@@ -16,6 +16,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import (
     FileResponse,
     HTMLResponse,
+    PlainTextResponse,
     RedirectResponse,
     StreamingResponse,
 )
@@ -36,17 +37,20 @@ from autopilot.connectors.oauth import (
     OAuthTokenStore,
     build_github_auth_url,
     build_google_auth_url,
+    build_oauth_state,
     exchange_code,
     exchange_github_code,
     github_configured,
     google_configured,
     mirror_google_oauth_to_siblings,
+    verify_oauth_state,
 )
 from autopilot.connectors.service import ConnectorDirectory
 from autopilot.connectors.tavily import TavilyConnector
 from autopilot.connectors.weather import WeatherConnector
 from autopilot.connectors.webhook import SentryConnector, WebhookConnector
 from autopilot.kernel import RuntimeKernel
+from autopilot.mcp_server import AutopilotMCPHTTP, AutopilotMCPServer
 from autopilot.models import (
     ActionResult,
     ApprovalStatus,
@@ -65,7 +69,7 @@ from autopilot.operators.llm import (
     preflight_providers,
     provider_health,
 )
-from autopilot.storage import ARTIFACT_DIR, ROOT, Store
+from autopilot.storage import ARTIFACT_DIR, ROOT, StateStore
 
 CONNECTOR_CLASSES = {
     "github": GitHubConnector,
@@ -88,12 +92,26 @@ logging.basicConfig(
     datefmt="%H:%M:%S",
 )
 
-store = Store()
+store = StateStore()
 registry = default_registry()
 directory = ConnectorDirectory(store)
 
 runtime = RuntimeKernel(store, registry)
 monitor_task: asyncio.Task | None = None
+mcp_task: asyncio.Task | None = None
+mcp_http_app: Any = None
+
+
+class _MCPMountProxy:
+    """ASGI app that delegates /mcp requests to the live transport once the
+    session manager has finished starting."""
+
+    async def __call__(self, scope: Any, receive: Any, send: Any) -> None:
+        target = mcp_http_app
+        if target is None or scope.get("type") != "http":
+            await PlainTextResponse("MCP transport unavailable", status_code=503)(scope, receive, send)
+            return
+        await target(scope, receive, send)
 
 
 def _frontend_redirect(query: str) -> RedirectResponse:
@@ -136,10 +154,26 @@ def _verify_webhook_signature(body: bytes, request: Request) -> None:
       - X-Hub-Signature-256   (GitHub)
       - X-Sentry-Hook-Signature (Sentry)
       - X-Autopilot-Signature (generic)
+
+    Fail-closed: when neither a webhook secret nor an API key is configured,
+    unverified ingest is refused unless AUTOPILOT_ALLOW_UNVERIFIED_WEBHOOKS=1
+    is explicitly set. A silently-open webhook endpoint lets anyone forge
+    operational signals that trigger autonomous missions.
     """
     secret = os.getenv("AUTOPILOT_WEBHOOK_SECRET", "").strip()
     if not secret:
-        return  # No secret configured — skip verification
+        api_key_set = bool(os.getenv("AUTOPILOT_API_KEY", "").strip())
+        allow_unverified = os.getenv("AUTOPILOT_ALLOW_UNVERIFIED_WEBHOOKS", "").lower() in {"1", "true", "yes"}
+        if not api_key_set and not allow_unverified:
+            raise HTTPException(
+                status_code=403,
+                detail=(
+                    "Webhook ingest refused: no AUTOPILOT_API_KEY and no AUTOPILOT_WEBHOOK_SECRET "
+                    "is configured. Set one of them, or AUTOPILOT_ALLOW_UNVERIFIED_WEBHOOKS=1 to "
+                    "explicitly accept unsigned local traffic."
+                ),
+            )
+        return
 
     sig_header = (
         request.headers.get("x-hub-signature-256", "")
@@ -189,6 +223,19 @@ class _TokenBucket:
 # 30 req/min default; override with AUTOPILOT_SIGNAL_RATE_LIMIT=N (per minute)
 _signal_rate = int(os.getenv("AUTOPILOT_SIGNAL_RATE_LIMIT", "30"))
 _signal_bucket = _TokenBucket(rate=_signal_rate / 60.0, capacity=float(_signal_rate))
+
+# Webhook ingest gets its own bucket: each event spawns an LLM investigation
+# swarm, so an unthrottled flood is expensive by construction.
+_webhook_bucket = _TokenBucket(rate=_signal_rate / 60.0, capacity=float(_signal_rate))
+
+
+async def _webhook_rate_limit() -> None:
+    if not await _webhook_bucket.consume():
+        raise HTTPException(
+            status_code=429,
+            detail=f"Webhook rate limit exceeded: max {_signal_rate}/minute.",
+            headers={"Retry-After": "60"},
+        )
 
 
 def _init_omium_sdk_if_configured() -> dict[str, Any]:
@@ -256,12 +303,20 @@ async def lifespan(app: FastAPI):
             mod = importlib.util.module_from_spec(spec)
             spec.loader.exec_module(mod)  # type: ignore[arg-type]
             mod.migrate()
-    except Exception:
-        pass  # Non-fatal — migration already applied or script not present
+    except Exception as exc:
+        logging.getLogger("autopilot.api").warning("Startup migration skipped: %s", exc)
     try:
-        store.prune_stale_traces(days=7)
+        pruned = store.prune_stale_traces(days=7)
+        if pruned:
+            logging.getLogger("autopilot.api").info("Pruned %d stale trace events", pruned)
     except Exception as exc:
         logging.getLogger("autopilot.api").warning("Trace cleanup failed: %s", exc)
+    if not os.getenv("AUTOPILOT_API_KEY", "").strip():
+        logging.getLogger("autopilot.api").warning(
+            "AUTOPILOT_API_KEY is not set — every endpoint (including mission cancel, "
+            "action approval, and webhook ingest) accepts unauthenticated requests. "
+            "Set it before exposing this service beyond loopback."
+        )
     omium_status = _init_omium_sdk_if_configured()
     store.trace(None, "omium.sdk.status", "complete" if omium_status.get("initialized") else "skipped", omium_status)
     if os.getenv("AUTOPILOT_PROVIDER_PREFLIGHT_ON_STARTUP", "").lower() in {"1", "true", "yes"}:
@@ -285,19 +340,56 @@ async def lifespan(app: FastAPI):
     except Exception:
         # Be conservative on startup — errors should not prevent the app from running.
         pass
-    global monitor_task
+    global monitor_task, mcp_task
     if os.getenv("AUTOPILOT_PERSISTENT_MONITORING", "").lower() in {"1", "true", "yes"}:
         monitor_task = asyncio.create_task(_monitor_connected_services_loop())
         store.trace(None, "monitor.started", "started", {"interval_seconds": _monitor_interval_seconds()})
+
+    # Periodic trace retention — startup-only pruning misses long-running
+    # processes, and trace_events grows without bound without it.
+    async def _retention_loop() -> None:
+        while True:
+            await asyncio.sleep(3600)
+            try:
+                store.prune_stale_traces(days=7)
+            except Exception:
+                logging.getLogger("autopilot.api").warning("Periodic trace pruning failed", exc_info=True)
+
+    retention_task = asyncio.create_task(_retention_loop())
+
+    # Serve the authenticated MCP Streamable HTTP transport under /mcp/.
+    # StreamableHTTPSessionManager requires its run() context to stay open
+    # for the lifetime of the app; a parked task holds it open.
+    async def _hold_mcp_transport() -> None:
+        global mcp_http_app
+        http = AutopilotMCPHTTP(AutopilotMCPServer(registry=registry, store=store, runtime=runtime))
+        try:
+            async with http.run():
+                # Bind the module-level target only once the session manager is
+                # actually serving, so the proxy never hands requests to a dead app.
+                mcp_http_app = http
+                await asyncio.Event().wait()  # park until cancelled
+        except Exception:
+            logging.getLogger("autopilot.api").warning("MCP transport task crashed", exc_info=True)
+
+    # Mount immediately: until the parked task finishes bring-up (milliseconds),
+    # _MCPMountProxy answers 503 while unbound, and the transport itself answers
+    # 503 "starting" until its session manager is live — no startup ordering race.
+    mcp_task = asyncio.create_task(_hold_mcp_transport())
+    app.router.routes[:] = [r for r in app.router.routes if getattr(r, "path", None) != "/mcp"]
+    app.mount("/mcp", _MCPMountProxy())
+
     try:
         yield
     finally:
-        if monitor_task and not monitor_task.done():
-            monitor_task.cancel()
-            try:
-                await monitor_task
-            except asyncio.CancelledError:
-                pass
+        for task in (monitor_task, mcp_task, retention_task):
+            if task and not task.done():
+                task.cancel()
+                try:
+                    await task
+                except asyncio.CancelledError:
+                    pass
+        if monitor_task:
             store.trace(None, "monitor.stopped", "complete", {})
 
 app = FastAPI(
@@ -738,25 +830,41 @@ async def disconnect_connector(connector_id: str, request: Request) -> dict[str,
 @app.post("/webhooks/{connector_name}")
 async def webhook(connector_name: str, request: Request) -> dict[str, Any]:
     require_write_access(request)
+    await _webhook_rate_limit()
     payload = await _verified_json_payload(request)
     connector = registry.get(connector_name) if registry.has_name(connector_name) else registry.get("webhook")
     signal = await connector.normalize_event(payload)
     signal.source = connector_name
-    store.trace(None, "webhook.received", "complete", {"connector": connector_name, "payload": payload})
+    store.trace(None, "webhook.received", "complete", {"connector": connector_name, "payload": _redacted_payload(payload)})
     mission = await runtime.ingest(signal)
     return {"accepted": True, "mission_id": mission.id, "signal_id": signal.id, "status": mission.status}
 
 
 async def _verified_json_payload(request: Request) -> dict[str, Any]:
     body = await request.body()
+    if len(body) > 512 * 1024:
+        raise HTTPException(status_code=413, detail="Webhook payload exceeds 512 KiB limit")
     _verify_webhook_signature(body, request)
     try:
         payload = json.loads(body)
-    except Exception:
-        raise HTTPException(status_code=400, detail="Invalid JSON body")
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail="Invalid JSON body") from exc
     if not isinstance(payload, dict):
         raise HTTPException(status_code=400, detail="Webhook JSON body must be an object")
     return payload
+
+
+def _redacted_payload(payload: dict[str, Any], limit: int = 4000) -> dict[str, Any]:
+    """Bound what we persist from inbound webhooks: full raw payloads can be
+    large and can contain third-party secrets; the trace only needs enough to
+    reconstruct the ingest decision."""
+    try:
+        serialized = json.dumps(payload, default=str)
+    except (TypeError, ValueError):
+        return {"truncated": True}
+    if len(serialized) <= limit:
+        return payload
+    return {"truncated": True, "preview": serialized[:limit]}
 
 @app.post("/api/signals")
 async def create_signal(signal_request: WebhookSignalRequest, request: Request) -> dict[str, Any]:
@@ -821,9 +929,20 @@ async def list_approvals(request: Request, status: ApprovalStatus | None = Appro
     return store.list_action_approvals(status)
 
 
+# Per-approval execution locks: approving the same action twice concurrently
+# must not double-fire the connector side effect.
+_approval_locks: dict[str, asyncio.Lock] = {}
+
+
 @app.post("/api/approvals/{approval_id}/approve")
 async def approve_action(approval_id: str, request: Request, payload: dict[str, Any] | None = None) -> dict[str, Any]:
     require_write_access(request)
+    lock = _approval_locks.setdefault(approval_id, asyncio.Lock())
+    async with lock:
+        return await _approve_action_locked(approval_id, request, payload)
+
+
+async def _approve_action_locked(approval_id: str, request: Request, payload: dict[str, Any] | None) -> dict[str, Any]:
     found = store.get_action_approval(approval_id)
     if not found:
         raise HTTPException(status_code=404, detail="Approval not found")
@@ -851,11 +970,19 @@ async def approve_action(approval_id: str, request: Request, payload: dict[str, 
         store.update_mission(mission)
         store.trace(mission.id, "approval.failed", "failed", approval.model_dump())
         return approval.model_dump()
+
+    # Persist the decision BEFORE executing so a crash mid-execution cannot
+    # leave the approval PENDING (which would let a retry fire the side
+    # effect twice).
+    approval.status = ApprovalStatus.EXECUTING
+    approval.decided_at = utc_now()
+    approval.decided_by = (payload or {}).get("decided_by") or "operator"
+    mission.approvals[index] = approval
+    store.update_mission(mission)
+
     try:
         result = await connector.action(approval.action, approval.payload)
         approval.result = result
-        approval.decided_at = utc_now()
-        approval.decided_by = (payload or {}).get("decided_by") or "operator"
         approval.status = ApprovalStatus.EXECUTED if result.status in {"complete", "skipped"} else ApprovalStatus.FAILED
         approval.error = None if approval.status == ApprovalStatus.EXECUTED else result.summary
         mission.approvals[index] = approval
@@ -877,8 +1004,6 @@ async def approve_action(approval_id: str, request: Request, payload: dict[str, 
     except Exception as exc:
         approval.status = ApprovalStatus.FAILED
         approval.error = str(exc)
-        approval.decided_at = utc_now()
-        approval.decided_by = (payload or {}).get("decided_by") or "operator"
         approval.result = ActionResult(
             connector=approval.connector,
             action=approval.action,
@@ -926,27 +1051,71 @@ async def artifact(artifact_name: str, request: Request) -> FileResponse:
 @app.get("/api/events")
 async def events(request: Request) -> StreamingResponse:
     require_read_access(request)
+
     async def stream():
+        last_version = ""
         last_payload = ""
         while True:
-            totals = {"missions": store.count_missions(), "traces": store.count_traces(), "approvals": len(store.list_action_approvals())}
-            payload = json.dumps({"missions": store.list_missions(limit=10000), "traces": store.list_traces(limit=5000), "totals": totals}, default=str)
-            if payload != last_payload:
-                yield f"data: {payload}\n\n"
-                last_payload = payload
+            if await request.is_disconnected():
+                return
+            try:
+                version = store.stream_version()
+                if version != last_version:
+                    # Serialize the snapshot only when something actually changed;
+                    # bounds keep a single slow client from re-reading the whole DB.
+                    totals = {"missions": store.count_missions(), "traces": store.count_traces(), "approvals": len(store.list_action_approvals())}
+                    payload = json.dumps(
+                        {
+                            "missions": store.list_missions(limit=200),
+                            "traces": store.list_traces(limit=500),
+                            "totals": totals,
+                        },
+                        default=str,
+                    )
+                    if payload != last_payload:
+                        yield f"data: {payload}\n\n"
+                        last_payload = payload
+                    last_version = version
+            except Exception:  # never let one bad poll kill the stream
+                logging.getLogger("autopilot.api").warning("SSE poll failed", exc_info=True)
             await asyncio.sleep(1)
 
     return StreamingResponse(stream(), media_type="text/event-stream")
 
 
+@app.post("/api/missions/{mission_id}/continue")
+async def continue_mission(mission_id: str, request: Request, payload: dict[str, Any] | None = None) -> dict[str, Any]:
+    """Resume a mission paused after analysis (`defer_delivery`), finalizing delivery.
+
+    The continuation secret is issued to the operator when the mission pauses;
+    presenting it proves an authorized party saw the paused state."""
+    require_write_access(request)
+    body = payload or {}
+    secret = str(body.get("continuation_secret") or "")
+    if not secret:
+        raise HTTPException(status_code=400, detail="continuation_secret is required")
+    resumed = runtime.resume_pipeline_delivery(mission_id, secret)
+    if not resumed:
+        mission = store.get_mission(mission_id)
+        if mission is None:
+            raise HTTPException(status_code=404, detail="Mission not found")
+        if mission.status.value == "waiting":
+            raise HTTPException(status_code=403, detail="Invalid continuation secret or delivery not pending")
+        raise HTTPException(status_code=409, detail=f"Mission is {mission.status.value}; only waiting missions can be continued")
+    store.trace(mission_id, "pipeline.continued", "started", {"operator": True})
+    mission = store.get_mission(mission_id)
+    return {"resumed": True, "mission": mission.model_dump() if mission else None}
+
+
 # ── Scoped agent routes ─────────────────────────────────────────────────────
 
-from autopilot.agents.specialized import (
+# Imported here deliberately: specialized agents pull in the operator layer,
+# which must be fully initialized before these route factories exist.
+from autopilot.agents.specialized import (  # noqa: E402
     CloudInfraAgent,
     ProjectMgmtAgent,
     SecurityAuditAgent,
 )
-from autopilot.state_store import StateStore as _StateStore
 
 
 @app.post("/api/agents/project-mgmt/create-issue")
@@ -954,7 +1123,7 @@ async def agent_project_mgmt_create_issue(request: Request, payload: dict[str, A
     """Create a Linear follow-up issue through the ProjectMgmtAgent policy gate."""
     require_write_access(request)
     p = payload or {}
-    agent = ProjectMgmtAgent(store=_StateStore(), registry=registry)
+    agent = ProjectMgmtAgent(store=store, registry=registry)
     result = await agent.create_follow_up_issue(
         mission_id=p.get("mission_id"),
         title=p.get("title"),
@@ -967,16 +1136,22 @@ async def agent_project_mgmt_create_issue(request: Request, payload: dict[str, A
 
 @app.post("/api/agents/cloud-infra/trigger-deployment")
 async def agent_cloud_infra_trigger_deployment(request: Request, payload: dict[str, Any] | None = None) -> dict[str, Any]:
-    """Trigger a deployment through the CloudInfraAgent (webhook or GitHub Actions dispatch)."""
+    """Queue a deployment through the CloudInfraAgent.
+
+    Deployments are HIGH-risk and can never be self-approved from the request
+    body: the agent evaluates policy with the human-approval rule enforced and
+    queues a pending ActionApproval on the scoped mission (or refuses when no
+    mission_id is supplied). Execution happens only after operator sign-off
+    via POST /api/approvals/{id}/approve.
+    """
     require_write_access(request)
     p = payload or {}
-    agent = CloudInfraAgent(store=_StateStore(), registry=registry)
+    agent = CloudInfraAgent(store=store, registry=registry)
     result = await agent.trigger_deployment(
         mission_id=p.get("mission_id"),
         environment=p.get("environment", "staging"),
         ref=p.get("ref", "main"),
         reason=p.get("reason", "AUTOPILOT deployment trigger"),
-        approved=bool(p.get("approved", False)),
     )
     store.trace(p.get("mission_id"), "agent.cloud_infra.trigger_deployment", result.status, result.model_dump())
     return result.model_dump()
@@ -987,7 +1162,7 @@ async def agent_security_audit_pr_open(request: Request, payload: dict[str, Any]
     """Run a PR-open security audit: writes a durable artifact and emits an ops notification."""
     require_write_access(request)
     p = payload or {}
-    agent = SecurityAuditAgent(store=_StateStore(), registry=registry)
+    agent = SecurityAuditAgent(store=store, registry=registry)
     result = await agent.run_pr_open_audit(payload=p, mission_id=p.get("mission_id"))
     store.trace(p.get("mission_id"), "agent.security_audit.pr_open", result.status, result.model_dump())
     return result.model_dump()
@@ -999,7 +1174,7 @@ async def agent_security_audit_pr_open(request: Request, payload: dict[str, Any]
 async def analytics_missions(request: Request) -> dict:
     """Aggregate mission statistics."""
     require_read_access(request)
-    analytics = _StateStore(store.path)
+    analytics = store  # shared StateStore — no schema rebuild per request
     return analytics.mission_stats()
 
 
@@ -1007,7 +1182,7 @@ async def analytics_missions(request: Request) -> dict:
 async def analytics_agents(request: Request) -> list[dict]:
     """Per-role agent performance metrics."""
     require_read_access(request)
-    analytics = _StateStore(store.path)
+    analytics = store  # shared StateStore — no schema rebuild per request
     return analytics.agent_performance()
 
 
@@ -1019,7 +1194,7 @@ async def analytics_connectors(request: Request) -> list[dict]:
     require_read_access(request)
 
     # 1. Get historical action stats (only connectors with actual mission actions)
-    analytics = _StateStore(store.path)
+    analytics = store  # shared StateStore — no schema rebuild per request
     history: dict[str, dict] = {
         c["connector"]: c for c in analytics.connector_health()
     }
@@ -1068,7 +1243,7 @@ async def metrics(request: Request) -> dict[str, Any]:
     Safe to scrape: read-only, no side effects.
     """
     require_read_access(request)
-    analytics = _StateStore(store.path)
+    analytics = store  # shared StateStore — no schema rebuild per request
 
     # Mission stats
     mission_data = analytics.mission_stats()
@@ -1136,7 +1311,9 @@ async def metrics(request: Request) -> dict[str, Any]:
 async def webhook_jira(request: Request) -> dict[str, Any]:
     """Ingest Jira issue webhooks (normalized via generic WebhookConnector)."""
     require_write_access(request)
+    await _webhook_rate_limit()
     payload = await _verified_json_payload(request)
+    store.trace(None, "webhook.received", "complete", {"connector": "jira", "payload": _redacted_payload(payload)})
     connector = WebhookConnector()
     signal = await connector.normalize_event(payload)
     signal.source = "jira"
@@ -1149,7 +1326,9 @@ async def webhook_jira(request: Request) -> dict[str, Any]:
 async def webhook_weather(request: Request) -> dict[str, Any]:
     """Ingest weather alert webhooks."""
     require_write_access(request)
+    await _webhook_rate_limit()
     payload = await _verified_json_payload(request)
+    store.trace(None, "webhook.received", "complete", {"connector": "weather", "payload": _redacted_payload(payload)})
     connector = WeatherConnector()
     signal = await connector.normalize_event(payload)
     mission = await runtime.ingest(signal)
@@ -1161,12 +1340,17 @@ async def webhook_weather(request: Request) -> dict[str, Any]:
 
 @app.get("/oauth/authorize/{connector_id}")
 async def oauth_authorize(connector_id: str) -> RedirectResponse:
-    """Redirect to OAuth2 consent screen for the given connector."""
+    """Redirect to OAuth2 consent screen for the given connector.
+
+    The state parameter is a signed, short-lived token binding provider and
+    connector id — the callback refuses any state it did not issue, so an
+    attacker cannot choose which connector row a code is stored under
+    (login CSRF / token-store poisoning)."""
     if connector_id == "github":
         if not github_configured():
             return _frontend_redirect("error=github_oauth_not_configured")
-        return RedirectResponse(url=build_github_auth_url(state=connector_id))
-        
+        return RedirectResponse(url=build_github_auth_url(state=build_oauth_state("github", "github")))
+
     if not google_configured():
         return _frontend_redirect("error=google_oauth_not_configured")
     scopes_map = {
@@ -1175,7 +1359,7 @@ async def oauth_authorize(connector_id: str) -> RedirectResponse:
         "google": SCOPES_COMBINED,
     }
     scopes = scopes_map.get(connector_id, SCOPES_COMBINED)
-    auth_url = build_google_auth_url(state=connector_id, scopes=scopes)
+    auth_url = build_google_auth_url(state=build_oauth_state("google", connector_id), scopes=scopes)
     return RedirectResponse(url=auth_url)
 
 
@@ -1191,8 +1375,13 @@ async def oauth_callback_google(
     if not code:
         return _frontend_redirect("oauth_error=missing_code")
     try:
+        # The signed state decides which connector the tokens belong to;
+        # attacker-supplied values are rejected before any exchange.
+        try:
+            connector_id = verify_oauth_state(state, "google")
+        except ValueError as exc:
+            return _frontend_redirect(f"oauth_error={str(exc)}")
         token_data = await exchange_code(code)
-        connector_id = state or "google"
         token_store = OAuthTokenStore(store.path)
         # Default user mapping
         user_id = "default_user"
@@ -1203,8 +1392,10 @@ async def oauth_callback_google(
         else:
             mirror_google_oauth_to_siblings(token_store, token_data, user_id, connector_id)
         return _frontend_redirect(f"oauth_success={connector_id}")
-    except Exception as e:
-        return _frontend_redirect(f"oauth_error={str(e)[:100]}")
+    except Exception:
+        log_api = logging.getLogger("autopilot.api")
+        log_api.warning("Google OAuth exchange failed", exc_info=True)
+        return _frontend_redirect("oauth_error=token_exchange_failed")
 
 
 @app.get("/oauth/callback/github")
@@ -1219,14 +1410,18 @@ async def oauth_callback_github(
     if not code:
         return _frontend_redirect("oauth_error=missing_code")
     try:
+        try:
+            connector_id = verify_oauth_state(state, "github")
+        except ValueError as exc:
+            return _frontend_redirect(f"oauth_error={str(exc)}")
         token_data = await exchange_github_code(code)
-        connector_id = state or "github"
         token_store = OAuthTokenStore(store.path)
         user_id = "default_user" # Real app extracts this from request session
         token_store.save(connector_id, token_data, user_id)
         return _frontend_redirect(f"oauth_success={connector_id}")
-    except Exception as e:
-        return _frontend_redirect(f"oauth_error={str(e)[:100]}")
+    except Exception:
+        logging.getLogger("autopilot.api").warning("GitHub OAuth exchange failed", exc_info=True)
+        return _frontend_redirect("oauth_error=token_exchange_failed")
 
 
 @app.delete("/oauth/revoke/{connector_id}")

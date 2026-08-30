@@ -7,6 +7,7 @@ from pathlib import Path
 
 import httpx
 
+from autopilot.connectors._ssrf import UnsafeDestinationError, assert_public_http_url
 from autopilot.connectors.base import Connector
 from autopilot.models import (
     ActionResult,
@@ -144,7 +145,7 @@ class NotificationConnector(Connector):
                 "action": action,
                 "integration_live": False,
             }
-        
+
         has_token = bool(os.getenv("SLACK_ACCESS_TOKEN"))
         has_webhook = bool(os.getenv("SLACK_WEBHOOK_URL"))
         channel_env = os.getenv("SLACK_DEFAULT_CHANNEL", "").strip()
@@ -180,6 +181,24 @@ class NotificationConnector(Connector):
             )
 
         if name == "webhook_callback" and callback_url:
+            # Payload-supplied destinations are untrusted (LLM plans, API callers):
+            # require a public http(s) host. Env-configured callbacks are operator
+            # config and only need a sane scheme.
+            payload_url = payload.get("callback_url")
+            try:
+                if payload_url:
+                    assert_public_http_url(callback_url)
+                elif not str(callback_url).lower().startswith(("http://", "https://")):
+                    raise UnsafeDestinationError("AUTOPILOT_CALLBACK_URL must be http(s)")
+            except UnsafeDestinationError as exc:
+                log.warning("webhook_callback destination refused: %s", exc)
+                return ActionResult(
+                    connector=self.manifest.name,
+                    action=name,
+                    status="blocked",
+                    summary=f"Callback destination refused by SSRF guard: {exc}",
+                    metadata={"mode": "webhook_callback"},
+                )
             try:
                 async with httpx.AsyncClient(timeout=10) as client:
                     response = await client.post(callback_url, json=payload)
@@ -191,7 +210,7 @@ class NotificationConnector(Connector):
                     summary="Posted outbound webhook callback.",
                     metadata={"mode": "webhook_callback", "status_code": response.status_code},
                 )
-            except (OSError, KeyError, ValueError) as exc:
+            except (httpx.HTTPError, OSError, KeyError, ValueError) as exc:
                 return ActionResult(
                     connector=self.manifest.name,
                     action=name,
@@ -204,7 +223,7 @@ class NotificationConnector(Connector):
         token = os.getenv("SLACK_ACCESS_TOKEN")
         webhook_url = os.getenv("SLACK_WEBHOOK_URL")
         text = payload.get("text", json.dumps(payload))
-        
+
         if token:
             channel = payload.get("channel") or os.getenv("SLACK_DEFAULT_CHANNEL", "#ops")
             try:

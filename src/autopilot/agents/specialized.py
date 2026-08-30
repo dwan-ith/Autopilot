@@ -6,7 +6,7 @@ from dataclasses import dataclass, field
 from typing import Any
 
 from autopilot.connectors.base import ConnectorRegistry
-from autopilot.models import ActionResult, Mission, PolicyDecision
+from autopilot.models import ActionResult, ActionApproval, Mission, MissionStatus, PolicyDecision, new_id
 from autopilot.policy import PolicyEngine
 from autopilot.state_store import StateStore
 
@@ -45,6 +45,26 @@ class ScopedAgent:
 
     def _mission(self, mission_id: str | None) -> Mission | None:
         return self.store.get_mission(mission_id) if mission_id else None
+
+    def _policy_context(self, mission_id: str | None) -> Mission:
+        """Mission used for policy evaluation.
+
+        When the request references no mission it is an authenticated
+        operator command, evaluated against a fully-confident synthetic
+        context — confidence gates pass, but risk-class and capability
+        gates still apply (HIGH-risk actions stay blocked here).
+        """
+        mission = self._mission(mission_id)
+        if mission:
+            return mission
+        return Mission(
+            id=f"operator-context-{new_id('ctx')}",
+            title="Operator-initiated direct request",
+            status=MissionStatus.COMPLETE,
+            severity="medium",
+            summary="Authenticated operator request without a mission scope.",
+            confidence=1.0,
+        )
 
     def _record_decision(self, mission: Mission | None, decision: PolicyDecision) -> None:
         if mission:
@@ -85,22 +105,21 @@ class ProjectMgmtAgent(ScopedAgent):
         }
 
         decisions: list[PolicyDecision] = []
-        if mission:
-            decision = self.policy.decide(mission, connector, "create_issue")
-            decisions.append(decision)
-            self._record_decision(mission, decision)
-            if not decision.allowed:
-                result = ScopedAgentResult(
-                    agent=self.agent_name,
-                    status="blocked",
-                    summary=decision.reason,
-                    mission_id=mission_id,
-                    policy_decisions=decisions,
-                    output={"provider": "linear"},
-                )
-                result.duration_ms = (time.time() - start) * 1000
-                self._trace(mission_id, "create_issue", "blocked", result.model_dump())
-                return result
+        decision = self.policy.decide_operator(self._policy_context(mission_id), connector, "create_issue")
+        decisions.append(decision)
+        self._record_decision(mission, decision)
+        if not decision.allowed:
+            result = ScopedAgentResult(
+                agent=self.agent_name,
+                status="blocked",
+                summary=decision.reason,
+                mission_id=mission_id,
+                policy_decisions=decisions,
+                output={"provider": "linear"},
+            )
+            result.duration_ms = (time.time() - start) * 1000
+            self._trace(mission_id, "create_issue", "blocked", result.model_dump())
+            return result
 
         action = await connector.action("create_issue", payload)
         self._record_action(mission, action)
@@ -136,7 +155,14 @@ class ProjectMgmtAgent(ScopedAgent):
 
 
 class CloudInfraAgent(ScopedAgent):
-    """One-action cloud agent: trigger a deployment via webhook or GitHub Actions dispatch."""
+    """One-action cloud agent: trigger a deployment via webhook or GitHub Actions dispatch.
+
+    Deployments are HIGH-risk: the client cannot self-approve them. A request
+    always evaluates policy with the human-approval rule enforced; the action
+    never executes directly — it is queued as a pending ActionApproval on the
+    scoped mission (or refused when no mission is supplied, so every
+    deployment keeps a traceable approval record).
+    """
 
     agent_name = "cloud_infra"
 
@@ -146,7 +172,6 @@ class CloudInfraAgent(ScopedAgent):
         environment: str = "staging",
         ref: str = "main",
         reason: str = "AUTOPILOT deployment trigger",
-        approved: bool = False,
     ) -> ScopedAgentResult:
         start = time.time()
         mission = self._mission(mission_id)
@@ -154,23 +179,49 @@ class CloudInfraAgent(ScopedAgent):
         payload = {"mission_id": mission_id, "environment": environment, "ref": ref, "reason": reason}
 
         decisions: list[PolicyDecision] = []
-        if mission:
-            policy = PolicyEngine(high_risk_requires_human=not approved)
-            decision = policy.decide(mission, connector, "trigger_deployment")
-            decisions.append(decision)
+        # high_risk_requires_human is deliberately not caller-configurable.
+        decision = PolicyEngine(high_risk_requires_human=True).decide_operator(
+            self._policy_context(mission_id), connector, "trigger_deployment"
+        )
+        decisions.append(decision)
+        if not decision.allowed and mission is not None:
+            approval = ActionApproval(
+                mission_id=mission.id,
+                connector=connector.manifest.name,
+                action="trigger_deployment",
+                payload=payload,
+                risk=decision.risk,
+                reason=decision.reason,
+            )
+            mission.approvals.append(approval)
             self._record_decision(mission, decision)
-            if not decision.allowed:
-                result = ScopedAgentResult(
-                    agent=self.agent_name,
-                    status="blocked",
-                    summary=decision.reason,
-                    mission_id=mission_id,
-                    policy_decisions=decisions,
-                    output={"approved": approved, **payload},
-                )
-                result.duration_ms = (time.time() - start) * 1000
-                self._trace(mission_id, "trigger_deployment", "blocked", result.model_dump())
-                return result
+            result = ScopedAgentResult(
+                agent=self.agent_name,
+                status="pending_approval",
+                summary=f"Deployment queued for human approval ({approval.id}) — {decision.reason}",
+                mission_id=mission_id,
+                policy_decisions=decisions,
+                output={"approval_id": approval.id, **payload},
+            )
+            result.duration_ms = (time.time() - start) * 1000
+            self.store.update_mission(mission)
+            self._trace(mission_id, "trigger_deployment", "pending_approval", result.model_dump())
+            return result
+        if not decision.allowed:
+            result = ScopedAgentResult(
+                agent=self.agent_name,
+                status="blocked",
+                summary=(
+                    f"{decision.reason} Deployments additionally require a mission scope so the "
+                    "approval has a traceable record — pass mission_id."
+                ),
+                mission_id=mission_id,
+                policy_decisions=decisions,
+                output={**payload},
+            )
+            result.duration_ms = (time.time() - start) * 1000
+            self._trace(mission_id, "trigger_deployment", "blocked", result.model_dump())
+            return result
 
         action = await connector.action("trigger_deployment", payload)
         self._record_action(mission, action)
@@ -182,7 +233,7 @@ class CloudInfraAgent(ScopedAgent):
             mission_id=mission_id,
             actions=[action],
             policy_decisions=decisions,
-            output={"approved": approved, **payload},
+            output=payload,
         )
         result.duration_ms = (time.time() - start) * 1000
         self._trace(mission_id, "trigger_deployment", action.status, result.model_dump())
@@ -202,6 +253,27 @@ class SecurityAuditAgent(ScopedAgent):
         artifact = self.registry.get("artifact")
         notification = self.registry.get("notification")
 
+        # The audit's side effects (artifact write, ops notification) go through
+        # policy like any other action; operator-initiated context satisfies the
+        # validation flag but confidence/capability gates still apply.
+        decisions: list[PolicyDecision] = []
+        context = self._policy_context(mission_id)
+        for connector, action_name in ((artifact, "write_report"), (notification, "notify_ops")):
+            decision = self.policy.decide_operator(context, connector, action_name)
+            decisions.append(decision)
+            if not decision.allowed:
+                result = ScopedAgentResult(
+                    agent=self.agent_name,
+                    status="blocked",
+                    summary=f"{connector.manifest.name}.{action_name} blocked by policy: {decision.reason}",
+                    mission_id=mission_id,
+                    policy_decisions=decisions,
+                )
+                result.duration_ms = (time.time() - start) * 1000
+                self._record_decision(mission, decision)
+                self._trace(mission_id, "pr_open_audit", "blocked", result.model_dump())
+                return result
+
         report = self._audit_report(signal.payload)
         artifact_action = await artifact.write(
             f"security-audit-{signal.id}",
@@ -216,6 +288,8 @@ class SecurityAuditAgent(ScopedAgent):
             },
         )
 
+        for decision in decisions:
+            self._record_decision(mission, decision)
         for action in [artifact_action, notify_action]:
             self._record_action(mission, action)
         self.store.remember("security_audit_agent", f"{signal.summary}: {artifact_action.status}/{notify_action.status}")

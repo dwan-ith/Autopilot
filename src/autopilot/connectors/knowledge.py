@@ -66,12 +66,19 @@ class KnowledgeConnector(Connector):
         for item in LOCAL_KNOWLEDGE:
             hits = sum(1 for kw in item["keywords"] if kw in query_l)
             if hits:
+                # Curated static runbooks are prior knowledge, not live findings:
+                # cap confidence well below what fresh API-backed evidence earns so
+                # downstream verifiers cannot mistake them for confirmed facts.
                 evidence.append(Evidence(
                     source=self.manifest.name,
                     title=item["title"],
                     summary=item["summary"],
-                    confidence=min(0.95, item["confidence"] + hits * 0.02),
-                    metadata={"kind": "local_runbook", "matched_keywords": hits},
+                    confidence=min(0.72, item["confidence"] + hits * 0.02),
+                    metadata={
+                        "kind": "local_runbook",
+                        "provenance": "curated_static_runbook",
+                        "matched_keywords": hits,
+                    },
                 ))
 
         tavily_key = os.getenv("TAVILY_API_KEY")
@@ -96,7 +103,7 @@ class KnowledgeConnector(Connector):
                     json={"api_key": api_key, "query": query, "max_results": 3, "search_depth": "basic"},
                 )
                 response.raise_for_status()
-        except (KeyError, ValueError, OSError) as exc:
+        except (httpx.HTTPError, KeyError, ValueError, OSError) as exc:
             return [Evidence(
                 source=self.manifest.name,
                 title="Live web search unavailable",

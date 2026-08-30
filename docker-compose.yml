@@ -4,6 +4,10 @@ services:
     ports:
       - "8090:8090"
     env_file: .env
+    environment:
+      # Must bind 0.0.0.0 inside the container for the port mapping to work;
+      # env_check warns loudly unless AUTOPILOT_API_KEY is also set.
+      AUTOPILOT_HOST: 0.0.0.0
     volumes:
       - autopilot-data:/app/data
       - autopilot-artifacts:/app/artifacts
@@ -12,6 +16,8 @@ services:
       interval: 30s
       timeout: 5s
       retries: 3
+      # Startup includes DB migration and MCP transport bring-up; give it room
+      start_period: 20s
 
   frontend:
     build: ./client

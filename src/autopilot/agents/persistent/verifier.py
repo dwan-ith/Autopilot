@@ -13,6 +13,7 @@ from __future__ import annotations
 import logging
 
 from autopilot.agents.base import AgentResult, PersistentAgent, SubAgent
+from autopilot.agents.validation import clamp, safe_confidence
 from autopilot.models import Mission
 
 log = logging.getLogger("autopilot.agents.verifier")
@@ -79,9 +80,17 @@ class VerifierAgent(PersistentAgent):
         r = result.answer
 
         if isinstance(r, dict) and "confidence" in r:
-            mission.confidence = round(min(0.96, float(r.get("confidence", 0.5))), 2)
+            # The LLM's self-report is the *input* to scoring, never an
+            # unbounded oracle: clamped to [0, 0.96] and sanity-bounded
+            # against the actual evidence on hand.
+            self_reported = safe_confidence(r.get("confidence"), default=0.5)
+            evidence_cap = min(0.96, 0.35 + 0.06 * len(mission.evidence)) if mission.evidence else 0.2
+            mission.confidence = round(min(self_reported, evidence_cap), 2)
             needs_replan = bool(r.get("needs_replan", False)) and mission.replans < 2
-            log.info("Verifier: confidence=%.2f needs_replan=%s", mission.confidence, needs_replan)
+            log.info(
+                "Verifier: confidence=%.2f (reported=%.2f, evidence_cap=%.2f) needs_replan=%s",
+                mission.confidence, self_reported, evidence_cap, needs_replan,
+            )
             return mission, needs_replan
 
         # Heuristic fallback
@@ -92,6 +101,6 @@ class VerifierAgent(PersistentAgent):
         source_diversity = len({e.source for e in mission.evidence})
         best_conf = max((h.confidence for h in mission.hypotheses), default=0)
         mission.confidence = round(
-            min(0.96, best_conf * 0.6 + strong * 0.05 + source_diversity * 0.04), 2
+            clamp(best_conf * 0.6 + strong * 0.05 + source_diversity * 0.04, 0.0, 0.96), 2
         )
         return mission.confidence < 0.65 and mission.replans < 2

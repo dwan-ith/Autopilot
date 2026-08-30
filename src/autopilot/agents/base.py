@@ -245,6 +245,15 @@ class SubAgent:
                 tool_name = parsed.get("tool", "")
                 tool_input = parsed.get("input", {})
 
+                if not isinstance(tool_input, dict):
+                    steps.append(AgentStep(
+                        step_number=step_num,
+                        thought=f"'input' must be a JSON object, got {type(tool_input).__name__}.",
+                        raw_llm_response=raw,
+                    ))
+                    ctx += "\n\n'input' must be a JSON object mapping parameter names to values. Respond again."
+                    continue
+
                 if tool_name not in self.tools:
                     steps.append(AgentStep(
                         step_number=step_num,
@@ -272,7 +281,9 @@ class SubAgent:
                             result_summary=str(tool_result.output)[:200] if tool_result.success else tool_result.error,
                         )
                     except Exception:
-                        pass  # Tracing must never crash the agent
+                        # Tracing must never crash the agent — but a silently
+                        # dead audit sink must be visible in logs.
+                        log.debug("Omium trace emission failed", exc_info=True)
 
                 # Extract any reasoning text the LLM provided before the tool call
                 # LLMs often include a 'thought' or 'reasoning' key alongside 'action'
@@ -352,6 +363,7 @@ class SubAgent:
 
         return steps, {
             "fallback": True,
+            "degraded": True,
             "evidence_gathered": [],
             "assessment": f"Heuristic mode: searched {calls} tool(s) — no LLM provider active.",
             "confidence": 0.55 if gathered else 0.3,

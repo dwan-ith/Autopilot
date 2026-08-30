@@ -81,6 +81,14 @@ class WeatherConnector(Connector):
 
     async def read(self, ref: str) -> dict[str, Any]:
         ref = self._normalize_location_query(ref)
+        if not ref:
+            # Never substitute a default city: fabricated weather for the wrong
+            # place is worse than an honest "no location given" error.
+            return {
+                "ref": ref,
+                "error": "No location provided — pass a city name or 'lat,lon'",
+                "provider": None,
+            }
         if not self._configured():
             return await self._read_open_meteo(ref)
         try:
@@ -114,7 +122,7 @@ class WeatherConnector(Connector):
     def _normalize_location_query(self, ref: str) -> str:
         original = (ref or "").strip()
         if not original:
-            return "London"  # explicit last-resort default — never silently empty
+            return ""  # callers must surface the missing-location error honestly
         cleaned = WEATHER_QUERY_WORDS.sub(" ", original)
         cleaned = re.sub(r"\s+", " ", cleaned).strip(" ,.-")
         cleaned = re.sub(r"^(in|near|for|at)\s+", "", cleaned, flags=re.IGNORECASE).strip()

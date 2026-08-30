@@ -409,7 +409,13 @@ async def preflight_providers() -> dict[str, Any]:
 
 
 def parse_json(text: str | None) -> dict[str, Any] | list | None:
-    """Best-effort JSON extraction from potentially messy LLM output."""
+    """Best-effort JSON extraction from potentially messy LLM output.
+
+    The fallback path uses ``JSONDecoder.raw_decode`` so it extracts the
+    *first complete* JSON value rather than slicing from the first opening
+    brace to the last closing brace — which could splice unrelated prose
+    between two fragments into a wrong-but-parseable object.
+    """
     if not text:
         return None
     text = text.strip()
@@ -426,13 +432,16 @@ def parse_json(text: str | None) -> dict[str, Any] | list | None:
         except json.JSONDecodeError:
             pass
 
-    for open_ch, close_ch in [("{", "}"), ("[", "]")]:
+    decoder = json.JSONDecoder()
+    for open_ch in ("{", "["):
         start = text.find(open_ch)
-        end = text.rfind(close_ch)
-        if start != -1 and end > start:
-            try:
-                return json.loads(text[start : end + 1])
-            except json.JSONDecodeError:
-                pass
+        if start == -1:
+            continue
+        try:
+            value, _end = decoder.raw_decode(text[start:])
+            if isinstance(value, (dict, list)):
+                return value
+        except json.JSONDecodeError:
+            continue
 
     return None

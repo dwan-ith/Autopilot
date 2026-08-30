@@ -253,8 +253,10 @@ Return: {"action": "answer", "result": {"new_hypotheses": [
             decision = await self.governor.decide_async(mission, connector, action_name)
             mission.policy_decisions.append(decision)
 
-            if decision.requires_validation and not decision.allowed:
-                # Queue for human approval
+            if not decision.allowed and decision.requires_validation:
+                # Mandatory human gate: queued whenever validation is required,
+                # regardless of any LLM endorsement. Only an explicit operator
+                # decision via the approvals API can release this action.
                 payload = self._action_payload(mission, brief, connector_name, action_name)
                 approval = ActionApproval(
                     mission_id=mission.id,

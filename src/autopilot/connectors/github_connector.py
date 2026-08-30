@@ -126,7 +126,7 @@ class GitHubConnector(Connector):
         has_pat = bool(_token())
         is_oauth_configured = github_configured()
         is_oauth_authorized = is_oauth_configured and is_authorized("github", self._db_path())
-        
+
         authorized = is_oauth_authorized or has_pat
         write_action = action in {"create_issue", "post_comment"}
         missing = []
@@ -134,13 +134,13 @@ class GitHubConnector(Connector):
             missing.append("GitHub Authorization (required for write actions)")
         if write_action and not self._default_repo():
             missing.append("GITHUB_REPO (required for write actions)")
-            
+
         mode = "oauth" if is_oauth_configured else ("authenticated" if has_pat else "anonymous_public")
-        
+
         detail = "GitHub API ready (authenticated)." if authorized else "Anonymous public GitHub search active."
         if not is_oauth_configured and not has_pat:
             detail += " Set GITHUB_CLIENT_ID/SECRET for OAuth, or GITHUB_TOKEN for PAT."
-            
+
         return {
             "configured": authorized,
             "read_ready": True,
@@ -255,10 +255,10 @@ class GitHubConnector(Connector):
                         )
                         continue
                     log.error("GitHub search failed: %s", exc)
-                    return []
-                except (httpx.RequestError, httpx.HTTPStatusError, json.JSONDecodeError, KeyError) as exc:
+                    return [self._search_error_evidence(query, str(exc))]
+                except (httpx.RequestError, json.JSONDecodeError, KeyError) as exc:
                     log.error("GitHub search failed: %s", exc)
-                    return []
+                    return [self._search_error_evidence(query, str(exc))]
 
         for item in data.get("items", []):
             results.append(Evidence(
@@ -276,6 +276,17 @@ class GitHubConnector(Connector):
                 },
             ))
         return results
+
+    def _search_error_evidence(self, query: str, detail: str) -> Evidence:
+        """Distinguish 'search failed' from 'no matches' so agents don't read a
+        network/API failure as negative evidence."""
+        return Evidence(
+            source="github",
+            title="GitHub search unavailable",
+            summary=f"Search for '{query[:80]}' failed: {detail}",
+            confidence=0.0,
+            metadata={"kind": "tool_error"},
+        )
 
     async def _search_issues(self, client: httpx.AsyncClient, search_query: str, headers: dict) -> dict[str, Any]:
         resp = await client.get(
